@@ -1,0 +1,47 @@
+43.134.56.157
+
+location /websocket {
+    proxy_redirect off;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+​
+    proxy_pass http://43.134.56.157:57728;
+  }
+
+
+
+pip install baidu-aip -i https://mirrors.aliyun.com/pypi/simple/
+pip install tqdm -i https://mirrors.aliyun.com/pypi/simple/
+pip install pillow -i https://mirrors.aliyun.com/pypi/simple/
+pip install tensorflow==1.14.0 -i https://mirrors.aliyun.com/pypi/simple/
+pip install mtcnn -i https://mirrors.aliyun.com/pypi/simple/
+pip install opencv-python -i https://mirrors.aliyun.com/pypi/simple/
+pip install face_recognition -i https://mirrors.aliyun.com/pypi/simple/
+
+cmake -G"NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=%cd%/install -DProtobuf_INCLUDE_DIR=<protobuf-root-dir>/build-vs2017/install/include  -DProtobuf_LIBRARIES=<protobuf-root-dir>/build-vs2017/install/lib/libprotobuf.lib -DProtobuf_PROTOC_EXECUTABLE=<protobuf-root-dir>/build-vs2017/install/bin/protoc.exe -DNCNN_VULKAN=ON ..
+
+
+cmake -G"NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=%cd%/install -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_MSVC_STATIC_RUNTIME=OFF ../cmake
+
+D:/softeware_work/annaconda/envs/pytorch/Lib/site-packages/torch/share/cmake/Torch
+
+cmake ../ -G "Visual Studio 16 2019"  -A x64 -DTorch_DIR=D:/softeware_work/annaconda/envs/pytorch/Lib/site-packages/torch/share/cmake/Torch -DCMAKE_INSTALL_PREFIX=./install
+
+cmake -DCMAKE_INSTALL_PREFIX=install -DTorch_INSTALL_DIR="E:/pnnx/libtorch" ..
+
+cmake .. -G "Visual Studio 16 2019" -DTorch_DIR=E:/pnnx/libtorch/share/cmake/Torch -DCMAKE_INSTALL_PREFIX=./install
+
+#ubuntu
+/home/sherlolo/anaconda3/lib/python3.8/site-packages/torch/share/cmake/Torch
+cmake .. -GNinja -DTorch_DIR=/home/sherlolo/anaconda3/lib/python3.8/site-packages/torch/share/cmake/Torch -DCMAKE_INSTALL_PREFIX=./install
+
+
+
+import torchvision
+from PIL import Image
+torchvision.transforms.ToPILImage()(img[0]).show()
+
