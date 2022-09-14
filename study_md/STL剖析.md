@@ -491,13 +491,14 @@ inline void destroy(char*, char*) {}
 inline void destroy(wchar_t*, wchar_t*) {}
 ```
 
-## 内存基本处理工具
+## 内存基本处理工具(uninitialized_)
 
 STL定于有5个全局函数，作用于未初始化空间上，这些功能对容器的实现非常有帮助：
 
 - uninitialized_copy(InputIterator first, InputIterator last, ForwardIterator result)	将[first,last)指向的范围拷贝到result
 - uninitialized_fill(ForwardIterator first, ForwardIterator last, const T& x)  将x值复制到[first,last)指向的范围
 - uninitialized_fill_n(ForwardIterator first, Size n, const T& x)  将x值复制到[first, first + n)指向的范围
+- POD指Plain Old Data, 也就是标量类型或传统类型，对POD类型将采取高阶的算法实现
 
 ![](./img/hj_17.png)
 
@@ -512,6 +513,7 @@ STL定于有5个全局函数，作用于未初始化空间上，这些功能对�
 
 
 ```c++
+// uninitialized_copy
 template <class InputIterator, class ForwardIterator>
 inline ForwardIterator 
 __uninitialized_copy_aux(InputIterator first, InputIterator last,
@@ -550,6 +552,7 @@ inline ForwardIterator
   return __uninitialized_copy(first, last, result, value_type(result));
 }
 
+// char* wchat* partilized
 inline char* uninitialized_copy(const char* first, const char* last,
                                 char* result) {
   memmove(result, first, last - first);
@@ -563,6 +566,7 @@ inline wchar_t* uninitialized_copy(const wchar_t* first, const wchar_t* last,
   return result + (last - first);
 }
 
+// uninitalized_copy_n
 template <class InputIterator, class Size, class ForwardIterator>
 pair<InputIterator, ForwardIterator>
 __uninitialized_copy_n(InputIterator first, Size count,
@@ -714,9 +718,363 @@ __uninitialized_copy_fill(InputIterator first1, InputIterator last1,
 
 
 
-# 容器
+# 迭代器(Iterator)和traits编程技术
+
+STL中心思想将数据容器(container)和算法(algorithm)分开，彼此独立设计。中间通过迭代器连接(Iterator)
+
+## traits编程技术
+
+### traits设计思想
+
+为了更好的封装性，会将迭代器的开发将给容器的设计者，算法再通过traits提取型别。
+
+traits扮演特性萃取机的功能：
+
+```c++
+template <class I>
+struct iterator_traits
+{
+	typedef typename I::value_type value_type;
+}
+
+// 针对指针类型的偏特化
+template <class I>
+struct iterator_traits<I*>
+{
+	typedef T value_type;
+}
+
+// 使用
+template <class I>
+typename iterator_traits<I>::value_type
+fun(I iter)
+{
+    return *iter;
+}
+```
+
+## type_traits
+
+iterator_traits负责萃取迭代器的特性，type_traits负责萃取型别的特性。
+
+type_traits萃取的型别包括：
+
+```c++
+__STL_TEMPLATE_NULL struct __type_traits<char> {
+   typedef __true_type    has_trivial_default_constructor;
+   typedef __true_type    has_trivial_copy_constructor;
+   typedef __true_type    has_trivial_assignment_operator;
+   typedef __true_type    has_trivial_destructor;
+   typedef __true_type    is_POD_type;
+};
+```
+
+针对type_traits方法，可以在设计算法时将传统型别和自定义的类别区别开来
+
+## 迭代器
+
+### 迭代器型别和类型
+
+迭代器中会定义5种型别，通过traits萃取出来:
+
+```c++
+template <class I>
+struct iterator_traits
+{
+    typedef typename I::iterator_category 	iterator_category;	
+    typedef typename I::value_type			value_type;			//迭代器所值对象的型别
+    typedef typename I::difference_type		difference_type;	//两个迭代器的距离 int8
+    typedef typename I::pointer				pointer;			//迭代器所值对象的指针
+    typedef typename I::reference			reference;			//迭代器所值对象的引用 分为const和非const
+}
+```
+
+迭代器的类型：
+
+- Input Iterator: 不允许外界改变，只读。
+- Output Iterator: 只写
+- Forward Iterator: 可读写
+- Bidirectional Iterator: 可双向移动
+- Random Access Iterator: 除前四种功能外，还可以：p+n, p1 - p2, p1 < p2
+
+![](./img/hj_18.png)
+
+### 迭代器设计源码
+
+```c++
+struct input_iterator_tag {};
+struct output_iterator_tag {};
+struct forward_iterator_tag : public input_iterator_tag {};
+struct bidirectional_iterator_tag : public forward_iterator_tag {};
+struct random_access_iterator_tag : public bidirectional_iterator_tag {};
+
+//自行开发的迭代器最好继承如下类
+template <class Category, class T, class Distance = ptrdiff_t,
+          class Pointer = T*, class Reference = T&>
+struct iterator {
+  typedef Category  iterator_category;
+  typedef T         value_type;
+  typedef Distance  difference_type;
+  typedef Pointer   pointer;
+  typedef Reference reference;
+};
+
+template <class Iterator>
+struct iterator_traits {
+  typedef typename Iterator::iterator_category iterator_category;
+  typedef typename Iterator::value_type        value_type;
+  typedef typename Iterator::difference_type   difference_type;
+  typedef typename Iterator::pointer           pointer;
+  typedef typename Iterator::reference         reference;
+};
+
+template <class T>
+struct iterator_traits<T*> {
+  typedef random_access_iterator_tag iterator_category;
+  typedef T                          value_type;
+  typedef ptrdiff_t                  difference_type;
+  typedef T*                         pointer;
+  typedef T&                         reference;
+};
+
+template <class T>
+struct iterator_traits<const T*> {
+  typedef random_access_iterator_tag iterator_category;
+  typedef T                          value_type;
+  typedef ptrdiff_t                  difference_type;
+  typedef const T*                   pointer;
+  typedef const T&                   reference;
+};
+
+//如下将产生一个临时对象来方便判断
+template <class Iterator>
+inline typename iterator_traits<Iterator>::iterator_category
+iterator_category(const Iterator&) {
+  typedef typename iterator_traits<Iterator>::iterator_category category;
+  return category();
+}
+
+template <class Iterator>
+inline typename iterator_traits<Iterator>::difference_type*
+distance_type(const Iterator&) {
+  return static_cast<typename iterator_traits<Iterator>::difference_type*>(0);
+}
+
+template <class Iterator>
+inline typename iterator_traits<Iterator>::value_type*
+value_type(const Iterator&) {
+  return static_cast<typename iterator_traits<Iterator>::value_type*>(0);
+}
+```
+
+
+
+# 序列式容器
+
+## vector
+
+### vector概述
+
+vector的数据安排以及操作方式和array非常相似。它们都是连续空间，两者唯一差别：array是静态空间，vector是动态空间。
+
+![](./img/hj_19.png)
+
+> G4.9
+
+![](./img/hj_20.png)
+
+
+
+### vector定义
+
+```c++
+template <class T, class Alloc = alloc>
+class vector {
+public:
+    typedef T value_type;
+    typedef value_type* pointer;
+    typedef const value_type* const_pointer;
+    typedef value_type* iterator; //vector的迭代器是指针 也是random access iterator类型
+    typedef const value_type* const_iterator;
+    typedef value_type& reference;
+    typedef const value_type& const_reference;
+    typedef size_t size_type;
+    typedef ptrdiff_t difference_type;
+    
+protected:
+    typedef simple_alloc<value_type, Alloc> data_allocator;
+    iterator start;
+    iterator finish;
+    iterator end_of_storage;
+	
+    void insert_aux(iterator position, const T& x);
+    void deallocate() {
+        if (start) data_allocator::deallocate(start, end_of_storage - start);
+    }
+
+    void fill_initialize(size_type n, const T& value) {
+        start = allocate_and_fill(n, value);
+        finish = start + n;
+        end_of_storage = finish;
+    }
+
+public:
+    iterator begin() { return start; }
+    const_iterator begin() const { return start; }
+    iterator end() { return finish; }
+    const_iterator end() const { return finish; }
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    const_reverse_iterator rbegin() const { 
+        return const_reverse_iterator(end()); 
+    }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+    const_reverse_iterator rend() const { 
+        return const_reverse_iterator(begin()); 
+    }
+    size_type size() const { return size_type(end() - begin()); }
+    size_type max_size() const { return size_type(-1) / sizeof(T); }
+    size_type capacity() const { return size_type(end_of_storage - begin()); }
+    bool empty() const { return begin() == end(); }
+    reference operator[](size_type n) { return *(begin() + n); }
+    const_reference operator[](size_type n) const { return *(begin() + n); }
+    
+    // ctor
+    vector() : start(0), finish(0), end_of_storage(0) {}
+    vector(size_type n, const T& value) { fill_initialize(n, value); }
+    vector(int n, const T& value) { fill_initialize(n, value); }
+    vector(long n, const T& value) { fill_initialize(n, value); }
+    explicit vector(size_type n) { fill_initialize(n, T()); }
+    
+    // dctor
+    ~vector() { 
+        destroy(start, finish);
+        deallocate();
+    }
+    
+    // front back
+    reference front() { return *begin(); }
+    const_reference front() const { return *begin(); }
+    reference back() { return *(end() - 1); }
+    const_reference back() const { return *(end() - 1); }
+    
+    
+    void push_back(const T& x) {
+        if (finish != end_of_storage) {
+            construct(finish, x);
+            ++finish;
+        }
+        else
+            insert_aux(end(), x);
+    }
+    
+    void pop_back() {
+        --finish;
+        destroy(finish);
+    }
+    
+    iterator erase(iterator position) {
+        if (position + 1 != end())
+            copy(position + 1, finish, position);
+        --finish;
+        destroy(finish);
+        return position;
+    }
+    
+    void resize(size_type new_size, const T& x) {
+        if (new_size < size()) 
+            erase(begin() + new_size, end());
+        else
+            insert(end(), new_size - size(), x);
+    }
+    void resize(size_type new_size) { resize(new_size, T()); }
+    void clear() { erase(begin(), end()); }
+    
+}; // class vector
+```
+
+
 
 ## list
+
+### list概述
+
+- list是一个环状双向链表
+- list其物理结构：链表
+- 对元素的插入和删除为常数时间
+- list不能随机访问
+- list和vector是两个最常用的容器
+
+### list的定义
+
+> list的节点
+
+```c++
+template <class T>
+struct __list_node
+{
+	typedef void* void_pointer;
+    void_pointer prev;	//指向前一元素指针
+    void_pointer next;	//指向后一元素指针
+    T data；	//数据节点
+};
+```
+
+> list的迭代器
+>
+> - list_iterator是bidirectional_iterator_tag 即可前后，但不可随机访问
+>
+> - list.end()是尾后指针，本身指向一个空节点
+
+![](./img/hj_21.png)
+
+```c++
+template <class T, class Ref, class Ptr>
+struct __list_iterator
+{
+	typedef __list_iterator<T, T&, T*>	iterator;
+    typedef __list_iterator<T, Ref, Ptr> self;
+    
+    typedef bidirectional_iterator_tag iterator_category;
+    typedef T value_type;
+    typedef Ptr pointer;
+    typedef Ref reference;
+    typedef __list_node<T>* link_type;
+    typedef size_t size_type;
+    typedef ptrdiff_t difference_type;
+
+    link_type node;
+
+    __list_iterator(link_type x) : node(x) {}
+    __list_iterator() {}
+    __list_iterator(const iterator& x) : node(x.node) {}
+
+    bool operator==(const self& x) const { return node == x.node; }
+    bool operator!=(const self& x) const { return node != x.node; }
+    reference operator*() const { return (*node).data; }
+    
+    pointer operator->() const { return &(operator*()); }
+    self& operator++() { 
+        node = (link_type)((*node).next);
+        return *this;
+    }
+    self operator++(int) { 
+        self tmp = *this;
+        ++*this;
+        return tmp;
+    }
+    self& operator--() { 
+        node = (link_type)((*node).prev);
+        return *this;
+    }
+    self operator--(int) { 
+        self tmp = *this;
+        --*this;
+        return tmp;
+    }
+}
+```
+
+![](./img/hj_22.png)
 
 list中对++进行重载时需要注意：
 
@@ -743,6 +1101,22 @@ sort和qsearch方法，要求其容器为randomIterator类型，因为算法中�
 
 
 # 泛型编程技术
+
+## template
+
+```c++
+template <...>;
+//template里面可以是一个模板参数，也可以是一个具体类型(int),也可以是一个变量
+
+// v是一个具体变量
+template <class T, T v>
+struct m_integral_constant
+{
+    static constexpr T value = v;
+};
+```
+
+
 
 ## 泛型编程常见库
 

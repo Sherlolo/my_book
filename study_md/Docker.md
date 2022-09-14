@@ -252,6 +252,8 @@ docker kill 容器id           #强制停止当前容器
 - docker exec: 进入容器后开启一个新的终端，可以在里面操作。
 - docker attach： 进入容器正在执行的终端，不会启动新的进程。
 
+ docker exec -it c703b5b1911f /bin/bash
+
 #退出
 exit #退出容器
 Ctrl+P+Q  #不停止容器退出
