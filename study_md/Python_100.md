@@ -1,5 +1,5 @@
-﻿# Python_100        
-        
+# Python_100        
+
 [TOC]
 
 ----------
@@ -44,14 +44,14 @@ ord()：将字符串（一个字符）转换成对应的编码（整数）。
     ** 指数
     a += 2 正确
     a++ 错误
-    
+
 ```
 获取输入和输出
 a = int(input('a = '))
 b = int(input('b = '))
 print('%d + %d = %d' % (a, b, a + b))
 ```
-    
+
 ### 1.3分支结构和循环结构
 
 分支结构
@@ -927,7 +927,7 @@ if __name__ == '__main__':
 |'+'|更新|
 
     ---:表示左对齐 :---: 表示居中对齐
-    
+
 - 文件夹处理
 
 ```
@@ -1124,7 +1124,7 @@ json模块主要有四个比较重要的函数，分别是：
 利用正则表达式处理字符串，查找复杂规则的字符串
 
     详细见https://github.com/jackfrued/Python-100-Days/blob/master/Day01-15/12.%E5%AD%97%E7%AC%A6%E4%B8%B2%E5%92%8C%E6%AD%A3%E5%88%99%E8%A1%A8%E8%BE%BE%E5%BC%8F.md
-    
+
 .	匹配任意字符	b.t	可以匹配bat / but / b#t / b1t等
 \w	匹配字母/数字/下划线	b\wt	可以匹配bat / b1t / b_t等
 但不能匹配b#t
@@ -1269,11 +1269,11 @@ if __name__ == '__main__':
 ```
       最后的结果是Ping和Pong各输出了10个，这是因为每个子进程有自己独立的内存空间，这也就意味着两个子进程中各有一个counter变量。
       要解决这个问题比较简单的办法是使用multiprocessing模块中的Queue类，它是可以被多个进程共享的队列，底层是通过管道和信号量（semaphore）机制来实现的，有兴趣的读者可以自己尝试一下。
-      
+
 ### 9.4 多线程
 
       在Python早期的版本中就引入了thread模块（现在名为_thread）来实现多线程编程，然而该模块过于底层，而且很多功能都没有提供，因此目前的多线程开发我们推荐使用threading模块，该模块对多线程编程提供了更好的面向对象的封装。我们把刚才下载文件的例子用多线程的方式来实现一遍。
-      
+
 ```
 from random import randint
 from threading import Thread
@@ -1503,7 +1503,7 @@ if __name__ == '__main__':
 ### 10.1 TCP/IP模型
 
       所谓“协议”就是通信计算机双方必须共同遵从的一组约定，例如怎样建立连接、怎样互相识别等，网络协议的三要素是：语法、语义和时序。构成我们今天使用的Internet的基础的是TCP/IP协议族，所谓协议族就是一系列的协议及其构成的通信模型，我们通常也把这套东西称为TCP/IP模型。与国际标准化组织发布的OSI/RM这个七层模型不同，TCP/IP是一个四层模型，也就是说，该模型将我们使用的网络从逻辑上分解为四个层次，自底向上依次是：网络接口层、网络层、传输层和应用层.
-      
+
 TCP全称传输控制协议，它是基于IP提供的寻址和路由服务而建立起来的负责实现端到端可靠传输的协议，之所以将TCP称为可靠的传输协议是因为TCP向调用者承诺了三件事情：
 
 - 数据不传丢不传错（利用握手、校验和重传机制可以实现）。
@@ -1613,7 +1613,7 @@ if __name__ == '__main__':
 ![http][1]
 
 
-  
+
 ### request参数
 
     requests.request(method, url, **kwargs)
@@ -1645,7 +1645,7 @@ if __name__ == '__main__':
 ![image.png-81.6kB][6]
 
 
-  
+
 ![image.png-196.8kB][7]
 
 
@@ -1680,16 +1680,16 @@ beautifulsoup的解析器有'html.parser'.'lxml'.'xml'.'html5lib'
 
 
  >beautifulsoup采用的编码时utf-8
- 
+
  ```
  html的注释形式
  <!--data-->
  ```
- 
- 
+
+
  ### 消息格式
- 
- 
+
+
  ![image.png-551.7kB][15]
 
 
@@ -1709,33 +1709,33 @@ beautifulsoup的解析器有'html.parser'.'lxml'.'xml'.'html5lib'
 
 
   ![image.png-534.5kB][20]
- 
+
 
  ![image.png-484.9kB][21]
 
 
-  [1]: http://static.zybuluo.com/ShowArcher/2g8rr82enguzcbgwge8oeh1h/image.png
-  [2]: http://static.zybuluo.com/ShowArcher/ijo0be7xiw5cza2on4fu1fye/image.png
-  [3]: http://static.zybuluo.com/ShowArcher/w3c38017la6yglk294nzsfzm/image.png
-  [4]: http://static.zybuluo.com/ShowArcher/n8e3f0vs3obm3h5vwhd4r1ll/image.png
-  [5]: http://static.zybuluo.com/ShowArcher/k2137u98g7lmfytu8kt6upce/image.png
-  [6]: http://static.zybuluo.com/ShowArcher/nzqi72nywrvqxuc7iav9a6hd/image.png
-  [7]: http://static.zybuluo.com/ShowArcher/yjt9tv0qm4fbh50wq54w77lk/image.png
-  [8]: http://static.zybuluo.com/ShowArcher/5jj4ydlzzyc4zfaofjreec2g/image.png
-  [9]: http://static.zybuluo.com/ShowArcher/l3ilqjq5355nidu2n9khnrpj/image.png
-  [10]: http://static.zybuluo.com/ShowArcher/bjg2uem2jftlt96mezw6se7i/image.png
-  [11]: http://static.zybuluo.com/ShowArcher/4hd1kay7sth3k0wvezju4mgv/image.png
-  [12]: http://static.zybuluo.com/ShowArcher/butra0sm49cteahyrii3cppg/image.png
-  [13]: http://static.zybuluo.com/ShowArcher/b75hgw88tqjmjn4aqtmqpupe/image.png
-  [14]: http://static.zybuluo.com/ShowArcher/uvbp2dn361x4uktl830oxc2l/image.png
-  [15]: http://static.zybuluo.com/ShowArcher/p6f1qisniwtbm1i9jrto17jp/image.png
-  [16]: http://static.zybuluo.com/ShowArcher/mty5kygppyzx1q5vtoezzncj/image.png
-  [17]: http://static.zybuluo.com/ShowArcher/y6kh61cfbfwmy3w7rwptgb34/image.png
-  [18]: http://static.zybuluo.com/ShowArcher/h5xk2xyzwlqppmump6oa4fgh/image.png
-  [19]: http://static.zybuluo.com/ShowArcher/h5xk2xyzwlqppmump6oa4fgh/image.png
-  [20]: http://static.zybuluo.com/ShowArcher/7f8t34w0rotlbya7n9mo6ua8/image.png
-  [21]: http://static.zybuluo.com/ShowArcher/wvkif66zxqf5fmlrw774ekvw/image.png\
-  
+[1]: http://static.zybuluo.com/ShowArcher/2g8rr82enguzcbgwge8oeh1h/image.png
+[2]: http://static.zybuluo.com/ShowArcher/ijo0be7xiw5cza2on4fu1fye/image.png
+[3]: http://static.zybuluo.com/ShowArcher/w3c38017la6yglk294nzsfzm/image.png
+[4]: http://static.zybuluo.com/ShowArcher/n8e3f0vs3obm3h5vwhd4r1ll/image.png
+[5]: http://static.zybuluo.com/ShowArcher/k2137u98g7lmfytu8kt6upce/image.png
+[6]: http://static.zybuluo.com/ShowArcher/nzqi72nywrvqxuc7iav9a6hd/image.png
+[7]: http://static.zybuluo.com/ShowArcher/yjt9tv0qm4fbh50wq54w77lk/image.png
+[8]: http://static.zybuluo.com/ShowArcher/5jj4ydlzzyc4zfaofjreec2g/image.png
+[9]: http://static.zybuluo.com/ShowArcher/l3ilqjq5355nidu2n9khnrpj/image.png
+[10]: http://static.zybuluo.com/ShowArcher/bjg2uem2jftlt96mezw6se7i/image.png
+[11]: http://static.zybuluo.com/ShowArcher/4hd1kay7sth3k0wvezju4mgv/image.png
+[12]: http://static.zybuluo.com/ShowArcher/butra0sm49cteahyrii3cppg/image.png
+[13]: http://static.zybuluo.com/ShowArcher/b75hgw88tqjmjn4aqtmqpupe/image.png
+[14]: http://static.zybuluo.com/ShowArcher/uvbp2dn361x4uktl830oxc2l/image.png
+[15]: http://static.zybuluo.com/ShowArcher/p6f1qisniwtbm1i9jrto17jp/image.png
+[16]: http://static.zybuluo.com/ShowArcher/mty5kygppyzx1q5vtoezzncj/image.png
+[17]: http://static.zybuluo.com/ShowArcher/y6kh61cfbfwmy3w7rwptgb34/image.png
+[18]: http://static.zybuluo.com/ShowArcher/h5xk2xyzwlqppmump6oa4fgh/image.png
+[19]: http://static.zybuluo.com/ShowArcher/h5xk2xyzwlqppmump6oa4fgh/image.png
+[20]: http://static.zybuluo.com/ShowArcher/7f8t34w0rotlbya7n9mo6ua8/image.png
+[21]: http://static.zybuluo.com/ShowArcher/wvkif66zxqf5fmlrw774ekvw/image.png\
+
 ## 12 生成器yield
 
 
@@ -1774,9 +1774,9 @@ for i in need_return():
 
 ### 定义
     Python的装饰器本质上是一个嵌套函数，它接受被装饰的函数(func)作为参数，并返回一个包装过的函数。这样我们可以在不改变被装饰函数的代码的情况下给被装饰函数或程序添加新的功能。Python的装饰器广泛应用于缓存、权限校验(如django中的@login_required和@permission_required装饰器)、性能测试(比如统计一段程序的运行时间)和插入日志等应用场景。有了装饰器，我们就可以抽离出大量与函数功能本身无关的代码，增加一个函数的重用性。
-
-    应用：对已写好的函数，可以添加其新的功能
     
+    应用：对已写好的函数，可以添加其新的功能
+
 闭包
 
     闭包是Python编程一个非常重要的概念。如果一个外函数中定义了一个内函数，且内函数体内引用到了体外的变量，这时外函数通过return返回内函数的引用时，会把定义时涉及到的外部引用变量和内函数打包成一个整体（闭包）返回。此时的临时变量会保留。
@@ -1909,10 +1909,10 @@ store_const 保存一个被定义为参数规格一部分的值，而不是一�
 append 将值保存到一个列表中。若参数重复出现，则保存多个值。
 append_const 将一个定义在参数规格中的值保存到一个列表中。
 version 打印关于程序的版本信息，然后退出
-    
 
 
-    
+
+​    
 
 
 ### parser.parse_args() 进行解析
@@ -1978,7 +1978,7 @@ print glob.glob(r'../*.py') #相对路径
 
 支持的数据结构：
 
--对象：键值对的集合，又称为映射（mapping）/ 哈希（hashes） / 字典（dictionary）
+- 对象：键值对的集合，又称为映射（mapping）/ 哈希（hashes） / 字典（dictionary）
 -数组：一组按次序排列的值，又称为序列（sequence） / 列表（list）
 -纯量（scalars）：单个的、不可再分的值。字符串、布尔值、整数、浮点数、Null、时间、日期
 

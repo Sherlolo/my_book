@@ -1084,7 +1084,375 @@ list中对++进行重载时需要注意：
 
 
 
+## deque
 
+### deque概述
+
+- deque是双端队列
+- deque在逻辑上是连续空间，所以迭代器类型是random_access_iterator_tag
+- deque在物理上采用分段连续空间 类似于map的物理结构
+
+### deque的迭代器
+
+![](./img/hj_23.png)
+
+```c++
+template <class T, class Ref, class Ptr, size_t BufSiz>
+struct __deque_iterator {
+    typedef __deque_iterator<T, T&, T*, BufSiz>             iterator;
+    typedef __deque_iterator<T, const T&, const T*, BufSiz> const_iterator;
+    static size_t buffer_size() {return __deque_buf_size(BufSiz, sizeof(T));} 
+  		                             
+    typedef random_access_iterator_tag iterator_category;
+  	typedef T value_type;
+  	typedef Ptr pointer;
+  	typedef Ref reference;
+  	typedef size_t size_type;
+  	typedef ptrdiff_t difference_type;
+  	typedef T** map_pointer;  
+    
+    T* cur;
+  	T* first;
+  	T* last;
+  	map_pointer node;
+    
+    
+}
+    
+```
+
+### deque的定义
+
+```c++
+template <class T, class Alloc = alloc, size_t BufSiz = 0> 
+class deque {
+public:                         // Basic types
+  typedef T value_type;
+  typedef value_type* pointer;
+  typedef const value_type* const_pointer;
+  typedef value_type& reference;
+  typedef const value_type& const_reference;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+  
+  typedef reverse_iterator<const_iterator, value_type, const_reference, 
+  difference_type>  
+      const_reverse_iterator;
+  typedef reverse_iterator<iterator, value_type, reference, difference_type>
+      reverse_iterator; 
+    
+protected:
+    typedef pointer* map_pointer;
+    typedef simple_alloc<value_type, Alloc> data_allocator;
+    typedef simple_alloc<pointer, Alloc> map_allocator;
+
+    static size_type buffer_size() {
+        return __deque_buf_size(BufSiz, sizeof(value_type));
+    }
+    static size_type initial_map_size() { return 8; }
+    
+protected:
+  iterator start;
+  iterator finish;
+
+  map_pointer map;
+  size_type map_size;
+    
+public:
+  iterator begin() { return start; }
+  iterator end() { return finish; }
+  const_iterator begin() const { return start; }
+  const_iterator end() const { return finish; }
+
+  reverse_iterator rbegin() { return reverse_iterator(finish); }
+  reverse_iterator rend() { return reverse_iterator(start); }
+  const_reverse_iterator rbegin() const {
+    return const_reverse_iterator(finish);
+  }
+  const_reverse_iterator rend() const {
+    return const_reverse_iterator(start);
+  }
+
+  reference operator[](size_type n) { return start[difference_type(n)]; }
+  const_reference operator[](size_type n) const {
+    return start[difference_type(n)];
+  }
+
+  reference front() { return *start; }
+  reference back() {
+    iterator tmp = finish;
+    --tmp;
+    return *tmp;
+  }
+  const_reference front() const { return *start; }
+  const_reference back() const {
+    const_iterator tmp = finish;
+    --tmp;
+    return *tmp;
+  }
+
+  size_type size() const { return finish - start;; }
+  size_type max_size() const { return size_type(-1); }
+  bool empty() const { return finish == start; }
+    
+  void resize(size_type new_size, const value_type& x) {
+    const size_type len = size();
+    if (new_size < len) 
+      erase(start + new_size, finish);
+    else
+      insert(finish, new_size - len, x);
+  }
+
+  void resize(size_type new_size) { resize(new_size, value_type()); }
+//...........
+};
+```
+
+## stack / queue
+
+### stack/queue概述
+
+- stack/queue底层是以其他容器来完成所有工作，而具有“修改某物接口，形成另一种特性”的做法，称为**adapter(配接器)**
+- stack/queue都不允许遍历，也不提供iterator
+- stack/queue都可选择list或deque作为底层容器
+- stack可选择vector作为底层容器，queue不可选择vector作为底层结构
+
+### stack/queue实现
+
+stack/queue与底层容器是一种包含关系
+
+```c++
+//stack
+
+class stack {
+  friend bool operator== __STL_NULL_TMPL_ARGS (const stack&, const stack&);
+  friend bool operator< __STL_NULL_TMPL_ARGS (const stack&, const stack&);
+public:
+  typedef typename Sequence::value_type value_type;
+  typedef typename Sequence::size_type size_type;
+  typedef typename Sequence::reference reference;
+  typedef typename Sequence::const_reference const_reference;
+protected:
+  Sequence c;
+public:
+  bool empty() const { return c.empty(); }
+  size_type size() const { return c.size(); }
+  reference top() { return c.back(); }
+  const_reference top() const { return c.back(); }
+  void push(const value_type& x) { c.push_back(x); }
+  void pop() { c.pop_back(); }
+};
+
+template <class T, class Sequence = deque<T>>
+class queue {
+  friend bool operator== __STL_NULL_TMPL_ARGS (const queue& x, const queue& y);
+  friend bool operator< __STL_NULL_TMPL_ARGS (const queue& x, const queue& y);
+public:
+  typedef typename Sequence::value_type value_type;
+  typedef typename Sequence::size_type size_type;
+  typedef typename Sequence::reference reference;
+  typedef typename Sequence::const_reference const_reference;
+protected:
+  Sequence c;
+public:
+  bool empty() const { return c.empty(); }
+  size_type size() const { return c.size(); }
+  reference front() { return c.front(); }
+  const_reference front() const { return c.front(); }
+  reference back() { return c.back(); }
+  const_reference back() const { return c.back(); }
+  void push(const value_type& x) { c.push_back(x); }
+  void pop() { c.pop_front(); }
+};
+```
+
+## heap
+
+### heap概述
+
+heap不属于stl容器组件，是priority queue的助手：
+
+- heap的性能介于queue和rb tree之间
+- bineray heap逻辑上是一种complete binary tree(完全二叉树)，用来实现priority queue
+- heap物理上采用数组来实现
+
+## priority_queue
+
+### priority_queue概述
+
+- priority_queue是一个具有权值概念的queue
+- 默认会使用max-heap来完成，max_heap是一个以vector表现的complete binary tree
+
+
+
+## slist
+
+### slist概述
+
+slist是一个单向链表，这个容器并不在标准规格中。
+
+- slist和list主要区别在于：slist的迭代器类型是单向的Forward_iterator, list的迭代器类型是双向的bidirectional Iterator
+- slist的功能相对较少，所耗用的空间更小，某些操作更快
+
+
+
+![](./img/hj_24.png)
+
+
+
+# 关联式容器
+
+标准的stl关联容器分为set和map两大类，以及这两大类的衍生体multiset和multimap。这些容器的底层机制均已RB-tree(红黑树)来完成。
+
+另外还提供一个不在标准规格之内的关联式容器；hash_set和hash_map是以hashtable为底层机制完成的
+
+## 树的概览
+
+- 二叉树：任何节点最多只允许两个字节点
+- 二叉搜索树：任何节点的键值一定大于其左子树的每个节点的键值，并小于其右子树的每个节点的键值
+- 平衡二叉搜索树：以一定平衡条件实现的二叉搜索树，比如：AVL-tree、RB-tree、AA-tree
+    - AVL-tree：左右子树高度相差最多为1的二叉搜索树
+
+## RB-tree（红黑树）
+
+RB-tree不仅是一个二叉搜索树，还满足如下规则：
+
+- 每个节点不是红色就是黑色
+- 根节点为黑色
+- 如果节点为红，其子节点必须为黑
+- 任一节点至NULL的任何路径，所含之黑节点数目必须相同
+
+### RB-tree的设计
+
+```c++
+template <class Key, class value, class KeyOfValue, class Compare, class Alloc = alloc>
+class rb_tree
+{
+protected:
+  typedef void* void_pointer;
+  typedef __rb_tree_node_base* base_ptr;
+  typedef __rb_tree_node<Value> rb_tree_node;
+  typedef simple_alloc<rb_tree_node, Alloc> rb_tree_node_allocator;
+  typedef __rb_tree_color_type color_type;
+public:
+  typedef Key key_type;
+  typedef Value value_type;
+  typedef value_type* pointer;
+  typedef const value_type* const_pointer;
+  typedef value_type& reference;
+  typedef const value_type& const_reference;
+  typedef rb_tree_node* link_type;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+protected:
+  link_type get_node() { return rb_tree_node_allocator::allocate(); }
+  void put_node(link_type p) { rb_tree_node_allocator::deallocate(p); }
+
+  link_type create_node(const value_type& x) {
+    link_type tmp = get_node();
+    __STL_TRY {
+      construct(&tmp->value_field, x);
+    }
+    __STL_UNWIND(put_node(tmp));
+    return tmp;
+  }
+
+  link_type clone_node(link_type x) {
+    link_type tmp = create_node(x->value_field);
+    tmp->color = x->color;
+    tmp->left = 0;
+    tmp->right = 0;
+    return tmp;
+  }
+
+  void destroy_node(link_type p) {
+    destroy(&p->value_field);
+    put_node(p);
+  }
+
+protected:
+  //rb_tree中的数据：
+  size_type node_count; // 追踪记录树的大小(节点数量)
+  link_type header;  // 树的根节点的父节点 是一种实现技巧
+  Compare key_compare; //节点间的键值大小比较准则 应该是个function object
+
+  link_type& root() const { return (link_type&) header->parent; }
+  link_type& leftmost() const { return (link_type&) header->left; }
+  link_type& rightmost() const { return (link_type&) header->right; }
+
+  static link_type& left(link_type x) { return (link_type&)(x->left); }
+  static link_type& right(link_type x) { return (link_type&)(x->right); }
+  static link_type& parent(link_type x) { return (link_type&)(x->parent); }
+  static reference value(link_type x) { return x->value_field; }
+  static const Key& key(link_type x) { return KeyOfValue()(value(x)); }
+  static color_type& color(link_type x) { return (color_type&)(x->color); }
+
+  static link_type& left(base_ptr x) { return (link_type&)(x->left); }
+  static link_type& right(base_ptr x) { return (link_type&)(x->right); }
+  static link_type& parent(base_ptr x) { return (link_type&)(x->parent); }
+  static reference value(base_ptr x) { return ((link_type)x)->value_field; }
+  static const Key& key(base_ptr x) { return KeyOfValue()(value(link_type(x)));} 
+  static color_type& color(base_ptr x) { return (color_type&)(link_type(x)->color); }
+
+  static link_type minimum(link_type x) { 
+    return (link_type)  __rb_tree_node_base::minimum(x);
+  }
+  static link_type maximum(link_type x) {
+    return (link_type) __rb_tree_node_base::maximum(x);
+  }
+   
+}
+```
+
+
+
+> 元素的操作
+
+rb_tree提供两种插入操作：
+
+- insert_unique(): 表示插入的节点独一无二，如果树中存在相同的键值，会返回相应的节点
+- insert_equal()：表示插入的节点在树中可以重复
+
+## set
+
+set的特性是：
+
+- 所有元素都会根据元素的键值自动被排序
+- set的键值就是实值
+- set是以rb_tree为底层机制
+- 插入操作是以insert_unique()为接口
+
+## map
+
+map的特性是：
+
+- 所有元素都会根据元素的键值自动被排序
+- map的所有元素都是pair
+- map是以rb_tree为底层机制
+- 插入操作是以insert_unique()为接口
+
+> 注意：map的迭代器可以改变元素的实值，不可改变元素的键值
+
+## multimap/multiset
+
+其特性和map/set一致，只是插入操作采用了insert_equal()
+
+## hashtable
+
+hashtable(散列表)和二叉搜索树在插入、删除、搜索等操作上也具有"常数平均时间"的表现。
+
+其设计思想和构成：
+
+- 哈希函数(hash function): 负责将某一元素映射为一个索引
+- 碰撞解决：即当不同元素被映射到相同位置的解决方案：线性探测、二次探测、开链
+- 散列：即负载因数超过0.5后就要重新配置
+
+## hash_set/hash_map(unordered_set/unordered_map)
+
+hash_set/hash_map是以hashtable为底层实现的，所以相较与set/map有如下特点：
+
+- hashtable没有自动排序功能
+- hashtable相较与rb_tree的空间和时间效率会更高
 
 # 算法
 
