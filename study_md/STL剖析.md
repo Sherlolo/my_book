@@ -1,4 +1,4 @@
-# STL剖析
+# 	STL剖析
 
 > gnu 2.9
 
@@ -233,6 +233,36 @@ SGI设计思想：
 - 考虑内存不足的应变措施
 - 考虑过多“小型区块”可能造成的内存碎片问题
 
+内存池的思路：
+
+- 使用allocate向内存池请求size大小的内存空间, 如果需要请求的内存大小大于128bytes, 直接使用malloc.
+- 如果需要的内存大小小于128bytes, allocate根据size找到最适合的自由链表.
+    　　a. 如果链表不为空, 返回第一个node, 链表头改为第二个node.
+    　　b. 如果链表为空, 使用blockAlloc请求分配node.
+    　　　　x. 如果内存池中有大于一个node的空间, 分配竟可能多的node(但是最多20个), 将一个node返回, 其他的node添加到链表中.
+    　　　　y. 如果内存池只有一个node的空间, 直接返回给用户.
+    　　　　z. 若果如果连一个node都没有, 再次向操作系统请求分配内存.
+    　　　　　　①分配成功, 再次进行b过程
+    　　　　　　②分配失败, 循环各个自由链表, 寻找空间
+    　　　　　　　　I. 找到空间, 再次进行过程b
+    　　　　　　　　II. 找不到空间, 抛出异常(代码中并未给出, 只是给出了注释)
+- 用户调用deallocate释放内存空间, 如果要求释放的内存空间大于128bytes, 直接调用free.
+- 否则按照其大小找到合适的自由链表, 并将其插入。
+
+内存池特点：
+
+- 刚开始初始化内存池的时候, 其实内存池中并没有内存, 同时所有的自由链表都为空链表.
+- 只有用户第一次向内存池请求内存时, 内存池会依次执行上述过程的 1->2->b->z来完成内存池以及链表的首次填充, 而此时, 其他未使用链表仍然是空的.
+- 所有已经分配的内存在内存池中没有任何记录, 释放与否完全靠程序员自觉.
+- 释放内存时, 如果大于128bytes, 则直接free, 否则加入相应的自由链表中而不是直接返还给操作系统.
+- deallocate对于小于128的bytes，函数接口并不是释放内存，而是放入自由链表中
+
+> deallocate这种释放释放算内存泄漏
+>
+> 在单线程中，由于该Allocator中记录内存池起始的指针是静态类型，所以只要是你在同一个线程中，无论你创建多少个Allocator，记录内存池的变量都是同一个，换句话说，当下次再创建Vector时，还是使用上一次使用的那个。也就是说他的存在时有意义的，这也是cache或memory pool的意义所在！
+>
+> 该内存池不会疯狂野生长，一直存在持续到程序结束
+
 ```c++
 // 8 16 24 ..... 128
 enum {__ALIGN = 8}; //小型区块的上调边界
@@ -255,7 +285,7 @@ private:
     
 private:
     
-    //free-lists 内含16个节点
+    //free-lists 内含16个节点 使用静态变量来声明
     static obj * __VOLATILE free_list[__NFREELISTS]; 
     
     // 根据区块大小 选择第n号free-lists
@@ -275,7 +305,8 @@ private:
     static size_t heap_size;
 
 public:
-
+	
+  //allocate分配内存
   static void * allocate(size_t n)
   {
     obj * __VOLATILE * my_free_list;
@@ -335,7 +366,8 @@ __default_alloc_template<threads, inst> ::free_list[__NFREELISTS]
 
 
 // chunk_alloc
-// 关键代码从内存池分配空间
+// 关键代码 分配内存空间
+// 初始化时会分配size*nobjs*2的堆空间 其中size*nobjs返回 剩下的留在[start_free, end_free]里面
 template <bool threads, int inst>
 char*
 __default_alloc_template<threads, inst>::chunk_alloc(size_t size, int& nobjs)
@@ -391,12 +423,14 @@ __default_alloc_template<threads, inst>::chunk_alloc(size_t size, int& nobjs)
 
 // refill
 // free list中没有可用空间时，会调用refill从新填充空间
+// 返回的n*nobjs堆空间会将第一个返回，剩余的填充到free_list对应的链表中
 template <bool threads, int inst>
 void* __default_alloc_template<threads, inst>::refill(size_t n)
 {
     int nobjs = 20;
     
     // 尝试使用chunk_alloc分配新空间 nobjs时pass by reference
+    // 会返回n*nobjs的堆空间
     char * chunk = chunk_alloc(n, nobjs);
     obj * __VOLATILE * my_free_list;
     obj * result;
@@ -409,7 +443,7 @@ void* __default_alloc_template<threads, inst>::refill(size_t n)
     // 否则从新调整区块空间
     my_free_list = free_list + FREELIST_INDEX(n);
 
-   
+   // 将除了第一个的n*nobjs的堆空间填充到free_list对应的链表中
     result = (obj *)chunk;
     *my_free_list = next_obj = (obj *)(chunk + n);
     for (i = 1; ; i++) {
@@ -452,6 +486,7 @@ __default_alloc_template<threads, inst>::reallocate(void *p,
 设计思想：
 
 - 在对对象进行析构时，如果析构函数时默认的，将什么也不做。
+- 判断是否trival的对象是指value_type而不是容器类型
 
 ![](./img/hj_16.png)
 
@@ -1456,15 +1491,571 @@ hash_set/hash_map是以hashtable为底层实现的，所以相较与set/map有�
 
 # 算法
 
-**算法其内部最终涉及元素的操作无非就是比大小**
+## 算法概要
+
+stl的算法通过迭代器来访问容器。即获取的一切信息都从迭代器中进行提取。
+
+- 算法的输入接口都为迭代器
+- **算法其内部最终涉及元素的操作无非就是比大小**
+
+## 迭代器类型对算法的影响
+
+迭代器的类型：
+
+- Input Iterator: 不允许外界改变，只读。
+- Output Iterator: 只写
+- Forward Iterator: 可读写
+- Bidirectional Iterator: 可双向移动
+- Random Access Iterator: 除前四种功能外，还可以：p+n, p1 - p2, p1 < p2
+
+> 而不同的类型在具体算法中的表现形式不一样，效率也不一样：
+>
+> 迭代器类型设计为class的原因：
+>
+> - 只需为特定的迭代器类型编写算法功能
+> - 其他的迭代器类型可以通过继承的方式来借用代码
+
+```c++
+// distance algorithm
+
+template <class InputIter>
+inline iterator_traits<InputIterator>::difference_type
+__distance(InputIterator first, InputIterator last, input_iterator_tag) //InputIterator的命名方式只是一种提示 而不是强制性要求
+{
+	while(first != last)
+    {
+        ++fist;
+        ++n;
+    }
+}
+
+template <class RandomAccessIterator>
+inline iterator_traits<InputIterator>::difference_type
+ __distance(RandomAccessIterator first, RandomAccessIterator last, random_access_iterator_tag)
+{
+	return last - first;
+}
+
+// client impl
+template <class InputIterator>
+inline iterator_traits<InputIterator>::difference_type
+distance(InputIterator first, InputIterator last)
+{
+	typedef typename iterator_traits<InputIterator>::iterator_category category;
+    return __distance(first, last, category());
+}
+
+
+```
+
+### 算法中具体的实现
+
+- 泛化：generalization,最基础的迭代器
+- 特化：specialization，针对某些可以提升效率或者需要其他操作的迭代器
+- 强化：refinement，主要是看是否为trival类型(基础类型)，基础类型的某些操作会更加高效或者不用destroy操作等
+
+![](./img/hj_25.png)
+
+> 注：使用memove()有两个原因：高效；指针类型可能存在覆盖的可能
 
 
 
-sort和qsearch方法，要求其容器为randomIterator类型，因为算法中需要对两个迭代器进行相减操作。
+## 常见的算法剖析
 
-以链表为基础实现的容器都不是randomIterator
+###  accumulate
 
-队列的存储结构？
+accumulate: 对[first,last)所指的范围通过某种操作累计到初值上
+
+```c++
+template <class InputIterator, class T>
+T accumulate(InputIterator first, InputIterator last, T init)
+{
+    for(; first != last; ++first)
+        init = init + *first;
+    return init;
+}
+
+template <class InputIterator, class T, class BinaryOperation>
+T accumulate(InputIterator first, InputIterator last, T init, BinaryOperation binary_op)
+{
+    for(; first != last; ++first)
+        init = binary_op(intit, *first);
+    return init;
+}
+
+
+
+// test
+#include <iostream>
+#include <functional> //std::minus
+#include <numeric>   //std::accumulate
+int myfunc(int x, int y) {return  x + 2*y;}
+struct myclass{
+    int operator()(int x, int y){return x + 3*y;}
+}myobj;
+
+int main()
+{
+    int init = 100;
+    int nums[] = {10, 20, 30};
+    cout << accumulate(nums, nums + 3, init, minus<int>());
+    cout << accumulate(nums, nums + 3, init, myfunc);
+    cout << accumulate(nums + 1, nums + 3, init, myobj);
+    return 0;
+}
+```
+
+### for_each
+
+for_each对迭代器指向的[first, last)进行functinon操作
+
+```c++
+template <class InputIterator, class Function>
+Function for_each(InputIterator first, InputIterator last, Function f)
+{
+	for(; first != last; ++first)
+    {
+        f(*first);
+    }
+    return f;
+}
+```
+
+> c++11的`for(decl : coll)算法`
+
+```
+for(auto i : {2,3,4,5})
+{
+	cout << i << endl;
+}
+```
+
+
+
+### replace
+
+replace: 如果旧值和新值相同，则替换为新值
+
+- replace(Iterator first, Iterator last, const T& old_value, const T& new_value):将范围内所有等同于old_value都已new_value取代
+- replace_if(Iterator first, Iterator last, Predicate Pred, const T& new_value):pred()为true的替换为新值
+- replace_copy(Iterator first, Iterator last, OutputIterator result const T& old_value, const T& new_value): 将所有等同于old_value都已new_value放置新区间，不符合的则放入原值
+
+```c++
+template <class ForwardIterator, class T>
+void replace(ForwardIterator first, ForwardIterator last,
+            const T& old_value, const T& new_value)
+{
+	for(; first != last; ++first)
+        if(*first == old_value)
+             *first = new_value;
+}
+
+template <class ForwardIterator, class Predicate, class T>
+void replace_if(ForwardIterator first, ForwardIterator last,
+            Predicate pred, const T& new_value)
+{
+	for(; first != last; ++first)
+        if(pred(*first))
+             *first = new_value;
+}
+
+template <class ForwardIterator, class OutputIterator class T>
+OutputIterator replace_copy(ForwardIterator first, ForwardIterator last,
+            	  OutputIterator result,
+                  const T& old_value, const T& new_value)
+{
+	for(; first != last; ++first)
+        *result = *first == old_value?new_value:*first;
+	return result;
+}
+
+```
+
+### count
+
+count: 计数范围内等于value的个数，注意：
+
+- 容器不带成员函数count(): array,vector,list, forward_list, deque
+- 容器带有成员函数count(): set/map, unordered_set/unoreder_map(关于需要遍历的算法，关联容器都有其成员函数来实现)
+
+```c++
+template <class InputIterator, class T>
+typename iterator_traits<InputIterator>::differnece_type
+count(InputIterator first, InputIterator last, const T& value)
+{
+    typename iterator_traits<InputIterator>::differnece_type n = 0;
+    for(; first != last; ++first)
+    {
+        if(*first == value)
+            ++n;
+    }
+    return n;
+}
+
+template <class InputIterator, class Predicate>
+typename iterator_traits<InputIterator>::differnece_type
+count_if(InputIterator first, InputIterator last, Predicate pred)
+{
+    typename iterator_traits<InputIterator>::differnece_type n = 0;
+    for(; first != last; ++first)
+    {
+        if(pred(*first))
+            ++n;
+    }
+    return n;
+}
+```
+
+### find
+
+find: 查找值所在的迭代器，查找失败返回last迭代器
+
+- 容器不带成员函数find(): array,vector,list, forward_list, deque
+- 容器带有成员函数find(): set/map, unordered_set/unoreder_map
+
+```c++
+template <class InputIterator, class T>
+InputIterator find(InputIterator first, InputIterator last, const T& value)
+{
+	while(first != last && *first != value)
+        ++first;
+    return first;
+}
+
+template <class InputIterator, class Predicate>
+InputIterator find_if(InputIterator first, InputIterator last, Predicate pred)
+{
+	while(first != last && !pred(*first))
+        ++first;
+    return first;
+}
+
+```
+
+### sort
+
+sort:对范围内进行排序，默认采用升序的形式
+
+- 容器不带成员函数find(): array,vector,l, deque， set/map, unordered_set/unoreder_map
+- 容器带有成员函数find(): list, forward_list( 直接插入修改)
+
+```c++
+int myints[] = {13,55, 11,67,79}
+vector<int> myvec(myints, myintts + 8);
+
+sort(myvec.begin(), myvec.end());
+sort(myvec.begin(), myvec.end(), myfunc);
+sort(myvec.rbegin(), myvec.rend()); //使用反向迭代器实现降序
+```
+
+### binary_search
+
+binary_search:  判读已经排好序的容器是否存在值。
+
+lower_bount: 返回值靠前的迭代器
+
+upper_bount:返回值靠后的迭代器
+
+![](./img/hj_26.png)
+
+# 仿函数(functors)
+
+## 仿函数概要
+
+仿函数：意思是指行为类似函数的类，如下：
+
+```c++
+//仿函数算法
+template <class T>
+struct plus : public binary_function<T,T,T>
+{
+    T operator()(const T& x, const T& y)
+    {return x + y;}
+};
+
+template <class T>
+struct minus : public binary_function<T,T,T>
+{
+    T operator()(const T& x, const T& y)
+    {return x - y;}
+};
+```
+
+## 仿函数的可适配条件
+
+stl算法的仿函数都会继承两个类：
+
+```c++
+template <class Arg, class Result>
+struct unary_function	//单元操作
+{
+    typedef Arg argument_type;
+    typedef Result result_type;
+};
+
+template <class Arg1, class Arg2, class Result>
+struct binary_function	//双元操作
+{
+    typedef Arg1 first_argument_type;
+    typedef Arg2 second_argument_type;
+    typedef Result result_type;
+}
+
+template <class T>
+struct less : public binary_function<T,T,bool> //less会继承二元操作
+{
+	bool operator()(const T& x, const T& y) const
+    {
+        return x < y;
+    }
+};
+```
+
+通过继承这两个类，适配器使用时才能访问到仿函数的类型
+
+# 适配器(adapter)
+
+## 适配器概述
+
+![](./img/hj_27.png)
+
+如上图所示:
+
+- 适配器有三种类型：迭代器适配器、容器适配器、仿函数适配器
+- 适配器和适配者是一种内含的关系，比如：stack的实现是内含了容器deque
+- 适配器也会询问适配者一些问题
+
+## binder2nd
+
+binder2nd用于绑定仿函数的第二参数。
+
+![](./img/hj_28.png)
+
+```c++
+//binder2nd的实现如下
+template <class Operation, class T>
+inline binder2nd<Operation> bind2nd(const Operation& op, const T& x)
+{
+	typedef typename Operation::second_argument_type arg2_type;
+    return binder2nd<Operation>(op, arg2_type(x));
+}
+
+template <class Operation>
+class binder2nd 
+: public unary_function<typename Operation::first_argument_type, typename Operation::result_type>
+{
+protected:
+    Operation op;
+    typename Operation::second_argument_type value;
+public:
+    binder2nd(const Operation& x, const typename Operation::second_argument_type& y) : op(x), value(y)
+    {}
+    
+    typename Operationr::result_type operator()(const typename Operation::first_argument_type& x) const
+    {
+        return op(x, value);
+    }
+};
+```
+
+## not1
+
+not1对一元仿函数的结果取反
+
+```c++
+//not1具体实现
+template <class Predicate>
+inline unary_negate<Predicate> not1(const Predicate& pred)
+{
+	return unary_negate<Predicate>(pred);
+}
+
+template <class Predicate>
+class unary_negate 
+: public unary_function<typename Predicate::argument_type, bool>
+{
+protected:
+    Predicate pred;
+    explicit unary_negate(const Predicate& x) : pred(x) {}
+    bool operator()(const typename Predicate::argument_type& x) const
+    {return !pred(x);}
+};
+```
+
+## bind和占位符
+
+bind(c++11):可以绑定：
+
+- functions
+- function objects
+- member functions 必须是某个object的地址
+- data members 必须是某个object的地址
+
+```c++
+using namespace std::placeholders; // add _1, _2, _3等占位符
+
+double my_divide(double x, double y)
+{
+    return x / y;
+}
+
+struct Mypair
+{
+    double a, b;
+    double multiply(){return a * b;}
+};
+
+auto fn_five = bind(my_divide, 10, 2);	// return 10 / 2;
+cout << fn_fice() << '\n';	// 5
+
+auto fn_half = bind(my_divide, _1, 2);	// return x / 2;
+cout << fn_half(10) << '\n';	// 5
+
+auto fn_invert = bind(my_divide, _2, _1);	// return y / x;
+cout << fn_invert(10, 2) << '\n';	// 0.2
+
+auto fn_rounding = bind<int>(my_divide, _1, _2);	// return (int)10 / 2;
+cout << fn_rounding(10, 3) << '\n';	// 3
+
+
+// 绑定成员函数和成员
+// 注意传入的参数是一个对象
+// 返回的是绑定的对象
+Mypair ten_two {10, 2};
+
+auto bound_memfn = bind(&Mypair::multiply, _1);
+cout << bound_memfn(ten_two) << '\n'; //20 
+
+auto bound_memdata = bind(&Mypair::a, ten_two);
+cout << bound_memdata << '\n'; //10
+
+auto bound_memdata2 = bind(&Mypair::b, _1);
+cout << bound_memdata2(ten_two) << '\n'; //2
+```
+
+## 迭代器适配器大部分会对赋值操作重载
+
+## reverse_iterator
+
+![](./img/hj_29.png)
+
+## inserter
+
+inserter接受一个容器和迭代器：
+
+- inserter将赋值操作转变为插入操作
+- 具体使用容器的insert插入到迭代器后
+- ++不进行操作，只返回本事
+
+![](./img/hj_30.png)
+
+```c++
+template <class Container>
+class insert_iterator {
+protected:
+  Container* container;
+  typename Container::iterator iter;
+public:
+  typedef output_iterator_tag iterator_category;
+  typedef void                value_type;
+  typedef void                difference_type;
+  typedef void                pointer;
+  typedef void                reference;
+
+  insert_iterator(Container& x, typename Container::iterator i) 
+    : container(&x), iter(i) {}
+  insert_iterator<Container>&
+  operator=(const typename Container::value_type& value) { 
+    iter = container->insert(iter, value);
+    ++iter;
+    return *this;
+  }
+  insert_iterator<Container>& operator*() { return *this; }
+  insert_iterator<Container>& operator++() { return *this; }
+  insert_iterator<Container>& operator++(int) { return *this; }
+};
+```
+
+# STL之外的常用技术
+
+## 一个万用的hash_function
+
+### hash_function实现为什么是一个类
+
+![](./img/hj_33.png)
+
+如果用函数来实现，则在调用时候需要给出函数的定义式和具体函数的地址
+
+### 万用hash_function的具体实现
+
+```c++
+#include <functional>
+template <typename T>
+inline void hash_combine(size_t& seed, const T& val)
+{
+    seed ^= std::hash<T>()(val) + 0x9e3779b9 	//黄金比例
+        	+ (seed<<6) + (seed>>2);
+}
+
+// ending functions
+template <typename T>
+inline void hash_val(size_t& seed, const T& val)
+{
+	hash_combine(seed, val);
+}
+
+// recursion 递归调用
+template <typename T, typename... Types>
+inline void hash_val(size_t& seed, const T& val, const Types&... args)
+{
+	hash_combine(seed, val);
+    hash_val(seed, args...);
+}
+
+// client impl
+template <typename... Types>
+inline size_t hash_val(const Types&.. args)
+{
+	size_t seed = 0;
+    hash_val(seed, args...);
+    return seed;
+}
+
+
+//具体使用
+class CustomerHash
+{
+public:
+    std::size_t operator()(const Customer& c) const
+    {
+        return hash_val(c.fname, c.lname, c.no);
+    }
+}
+```
+
+### struct hash偏特化的形式实现hash function
+
+为了unordered_set/unordered_map中能使用自定义的类型，需要在std名称空间中定义自己的hash函数
+
+![](./img/hj_34.png)
+
+ 如下图所示：如果使用MyString，需要在std中定义自己的hash_function![](./img/hj_35.png)
+
+## tuple
+
+### tuple介绍
+
+![](./img/hj_36.png)
+
+注意如下用法：
+
+- `tuple_size<TypleType>::value` 返回tuple中的变量个数
+- `tuple_element<1, TupleType>::type` 表示tuple中第一个参数的类型
+- `tie(i1,f1,s1) = t3` 表示将t3中的值依次赋给tie中的变量
+
+### tuple实现
+
+![](./img/hj_37.png)
 
 
 
@@ -1483,6 +2074,26 @@ struct m_integral_constant
     static constexpr T value = v;
 };
 ```
+
+## ostream_iterator
+
+ostream_iterator:
+
+- 第一个参数为输出流，第二个为每次输出后添加的字符串
+- 重载赋值操作为输出cout
+- ++操作返回*this
+
+![](./img/hj_31.png)
+
+## istream_iterator
+
+istream_iterator:
+
+- 初始化会调用++操作进行标准输入操作
+- 会使用默认构造函数来创建一个结束标志迭代器
+- 重载++操作，会输入并对输入结果进行判断
+
+![](./img/hj_32.png)
 
 
 
@@ -1517,6 +2128,8 @@ typename std::enable_if<std::is_integral<T>::value,bool>::type
  is_odd (T i) {return bool(i%2);}
 ```
 
+ 
+
 ## trait技术
 
 C++ 的 traits 技术，是一种约定俗称的技术方案，用来为同一类数据（包括自定义数据类型和内置数据类型）提供统一的操作函数，例如 advance(), swap(), encode()/decode() 等。
@@ -1546,13 +2159,17 @@ std::enable_if< (3 < 2)>::type* mypoint1 = nullptr;	//参数为false，没有typ
 由上可知：
 
 - 可接受两个参数，只有当第一个参数为true时，type才有定义。
-- 可接受一个参数，当参数为true时，type才有定义，为void
+- 可接受一个参数，当参数为true时，type才有定义为void
 
 ### std::enable_if()的引用原因
 
 enable_if()的出现体现c++的SFINAE规则，所谓的***SFINAE规则***就是在编译时进行查找替换，对于重载的函数，如果能够找到合适的就会替换，如果第一个不合适并不会报错，而会使用下一个替换直到最后一个，如果都不满足要求，那么才会报错。出现二义性的话也会报错。
 
 ### std::enable_if()的用法
+
+> 在使用模板编程时，经常会用到根据模板参数的某些特性进行不同类型的选择，或者在编译时校验模板参数的某些特性
+>
+> enable_if常和其他方法一起使用 std::is_trivially等
 
 - 用法一: 类型偏特化
 
@@ -1657,5 +2274,26 @@ int main()
     system("pause");
     return 0;
 }
+```
+
+## 判断类里面是否含有某个类型
+
+使用了c++的特性如下：
+
+- `type* ptr = 0;` 一个指针类型可以直接赋值0
+- `...` 可以接受任意参数
+
+```c++
+// to judge iterator has iterator
+template <class T>
+struct has_iterator_cat			
+{
+private:
+  struct two { char a; char b; };
+  template <class U> static two test(...);
+  template <class U> static char test(typename U::iterator_category* = 0);	//iterator::iterator_category* tmp = 0; 声明一个临时类指针并赋值为0
+public:
+  static const bool value = sizeof(test<T>(0)) == sizeof(char);
+};
 ```
 

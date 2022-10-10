@@ -42,7 +42,7 @@ add_executable(hello)
 add_executable(good)
 将对于生成两个可执行文件
 
---target hello就只生成hel
+--target hello就只生成hello
 ```
 
 
@@ -67,7 +67,7 @@ target_include_directories(hello_library
 )
 
 
-#根据main.cpp生成可执行文件
+#根据main.cpp生成可执行文件 用所有的源文件生成一个可执行文件
 add_executable(hello_binary
     src/main.cpp
 )

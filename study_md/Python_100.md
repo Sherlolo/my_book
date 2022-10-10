@@ -942,6 +942,8 @@ os.path.isfile(path) #是否文件
 os.removedirs(path) #移除文件夹
 os.remove(path) #移除文件
 os.path.getsize(path) #获取文件大小
+os.path.basename(path) #返回文件名
+os.path.dirname(path) #返回文件路径
 
 #对文件夹里面有内容的移除
 import shutil

@@ -1704,14 +1704,26 @@ type(expr);  //函数形式
 
 ## for循环
 
-```
+```c++
 for(int i = 0; i < 5; i++)
     cout << "hello world";
+    
+    
+for(int x = 1, size_t y = 2.4; x == 1; x++) // error
+{
+    std::cout << "hello" << std::endl;
+}
+
+for(int x = 1, y = 2.4; x == 1; x++) //correct
+{
+    std::cout << "hello" << std::endl;
+}
 ```
 
 - for语句的控制部分由三个表达式组成。
 - 对任何表达式加上分号都可以成为语句，但这句话放过来就不行。
 - for里面声明的变量，其作用域只在for语句中。
+- for初始化不能声明不同类型的变量，只能通过“,”运算符来声明相同的变量
 
 ## 递增和递减运算符
 
@@ -3842,6 +3854,53 @@ class StrVec
     StrVec& operator=(std::initializer_list<std::string>); //列表赋值
 }
 ```
+
+### 输入输出重载
+
+```c++
+class Time
+{
+private:
+    int hours;
+    int minutes;
+public:
+    Time();
+    Time(const int h, const int m = 0);
+    void AddMin(int m);
+    void AddHr(int h);
+    void Reset(int h = 0, int m = 0);
+    long total_minutes() const
+    {
+        return hours*60 + minutes;
+    }
+    Time operator+(const Time & t) const;
+    Time operator-(const Time & t) const;
+    Time operator*(const double n) const;
+    friend Time operator*(double m, const Time & t)
+    {
+        return t * m;   //inline definition
+    }
+    friend std::ostream & operator<<(std::ostream & os, const Time & t);
+
+};
+
+std::ostream & operator<<(std::ostream & os, const Time & t //不能xie'c
+{
+    os << t.hours << " hours, " << t.minutes << " minutes ";
+    return os;
+}
+
+std::istream& operator>>(std::istream &is, Sales_data& item)
+{
+	double price;
+    is >> item.bookNo >> item.units_sold >> price;
+    return is;
+}
+```
+
+
+
+
 
 ### 下标运算符
 
