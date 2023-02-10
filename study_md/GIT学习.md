@@ -1,4 +1,4 @@
-﻿# GIT学习
+# GIT学习
 
 标签： study
 
@@ -25,6 +25,7 @@ git status
 git add .                  添加所有文件到暂存区
 git commit -m "消息内容"    提交暂存区中的内容到本地仓库 -m 提交信息
 git push                   上传仓库文件到远程仓库
+git push origin master
 ```
 
 ## 1 前言
@@ -111,7 +112,7 @@ Git本地有三个工作区域：工作目录（Working Directory）、暂存区
 ![image.png-92.2kB][3]
 
 
-  
+
 - GIT仓库的创建
 
 ```
@@ -309,11 +310,11 @@ git中的分支即平行独立的版本
 ![image.png-71.8kB][4]
 
 
-  [1]: http://static.zybuluo.com/ShowArcher/xqs6gdxo8szpvw2456rhjase/image.png
-  [2]: http://static.zybuluo.com/ShowArcher/m1czhn2lg6fcu12cidw6vg2h/image.png
-  [3]: http://static.zybuluo.com/ShowArcher/lxvk5ocn2hs8qn4lcy4n9v5i/image.png
-  [4]: http://static.zybuluo.com/ShowArcher/3vmfg1y00m25ikte4qrpxuv0/image.png
-  
+[1]: http://static.zybuluo.com/ShowArcher/xqs6gdxo8szpvw2456rhjase/image.png
+[2]: http://static.zybuluo.com/ShowArcher/m1czhn2lg6fcu12cidw6vg2h/image.png
+[3]: http://static.zybuluo.com/ShowArcher/lxvk5ocn2hs8qn4lcy4n9v5i/image.png
+[4]: http://static.zybuluo.com/ShowArcher/3vmfg1y00m25ikte4qrpxuv0/image.png
+
 git中的分支指令
 
 ```
