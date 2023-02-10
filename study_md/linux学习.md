@@ -1,4 +1,4 @@
-﻿﻿# linux学习
+# linux学习
 
 标签（空格分隔）： study
 
@@ -1713,7 +1713,7 @@ esac
 
 ### 循环 while和for
 
-```
+```bash
 while [ condition ]
 do
     ....

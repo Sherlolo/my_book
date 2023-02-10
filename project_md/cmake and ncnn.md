@@ -322,7 +322,6 @@ Convolution conv1   1 1 data conv1 0=96 1=11 2=1 3=4 4=0 5=1 6=34848
 - debug和release的版本一定要统一对应
 - 编译会缺少glslang和python需要自己git
 
-
 ## onnx到ncnn
 
 ### 转换onnx
@@ -332,7 +331,7 @@ Convolution conv1   1 1 data conv1 0=96 1=11 2=1 3=4 4=0 5=1 6=34848
 torch_out = torch.onnx.export(newmodel.module, x, "img2pose.onnx", training=False, verbose=False, opset_version=11)
 
 #onnx模型简化
-python3 -m onnxsim input_model output_onnx_model
+python3 -m onnxsim input_model output_onnx_model --input-shape 1,3,48,320
 
 #生成ncnn模型
 onnx2ncnn model.onnx model.param model.bin 

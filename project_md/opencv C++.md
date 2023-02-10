@@ -1,4 +1,4 @@
-﻿# opencv C++
+# opencv C++
 
 标签（空格分隔）： project
 
@@ -17,7 +17,7 @@ matTemp.convertTo(MatTemp2, CV_8U); //把矩阵matTemp转为unsing char类型的
 
 ## ncnn和cv矩阵的相互转换
 
-```
+```c++
 //cv::mat -> ncnn::mat
 cv::Mat in_matc;
 ncnn::Mat input = ncnn::Mat::from_pixels(in_matc.data, ncnn::Mat::PIXEL_BGR, in_matc.cols, in_matc.rows);
@@ -40,7 +40,7 @@ in.to_pixels(a.data, ncnn::Mat::PIXEL_GRAY);
 
 ## cv::copyMakeBorder
 
-```
+```c++
 //top指的是上边界往上扩招的行数
 copyMakeBorder(
     Mat src,    //输入图像

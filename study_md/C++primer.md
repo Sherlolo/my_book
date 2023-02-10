@@ -99,6 +99,60 @@ u8"hi!" //utf-8字符串字面值
 using SI = Sales_item;
 ```
 
+## char字符串函数
+
+### strpbrk
+
+C 库函数 **char \*strpbrk(const char \*str1, const char \*str2)** 检索字符串 **str1** 中第一个匹配字符串 **str2** 中字符的字符，不包含空结束字符。检验的是字符不是字符串
+
+也就是说，依次检验字符串 str1 中的字符，当被检验字符在字符串 str2 中也包含时，则停止检验，并返回该字符位置。
+
+```c++
+#include <stdio.h>
+#include <string.h>
+ 
+int main ()
+{
+   const char str1[] = "abcde2fghi3jk4l";
+   const char str2[] = "34";
+   char *ret;
+ 
+   ret = strpbrk(str1, str2);
+   if(ret) 
+   {
+      printf("第一个匹配的字符是： %c\n", *ret);
+   }
+   else 
+   {
+      printf("未找到字符");
+   }
+   
+   return(0);
+}
+
+//输出
+//第一个匹配的字符是： 3
+```
+
+###  strcasecmp
+
+- strcasecmp用忽略大小写比较字符串
+- strcasecmp函数是二进制且对大小写不敏感。此函数只在Linux中提供，相当于windows平台的 stricmp。
+
+```c++
+#include<strings.h>
+int strcasecmp(const char *s1, const char *s2);
+```
+
+### strspn
+
+C 库函数 **size_t strspn(const char \*str1, const char \*str2)** 检索字符串 **str1** 中第一个不在字符串 **str2** 中出现的字符下标
+
+```c++
+size_t strspn(const char *str1, const char *str2)
+```
+
+
 
 ##  wchar_t 
 
@@ -1485,7 +1539,7 @@ multiset<Sales_data, decltype(compareIsbn)*> bookstore(compareIsbn);
 pair类型定义在头文件utility中。一个pair中可以保存两个数据成员，分别命名为first和second
 
 ```
-pait<string, vector<int>> line;
+pair<string, vector<int>> line;
 std::cout << line.first;
 ```
 
@@ -6749,6 +6803,20 @@ string s = "hello";
 
 > 注意： 头文件中不要加入using指示或using声明
 
+# C++程序资源释放
+
+如果程序退出时没有释放资源，进程结束时，所有空间和资源都会被操作系统回收
+
+- 内存泄漏只是针对运行者的进程而言，结束后所有分配的资源都会被回收
+
+- 但是系统回收资源操作有限，并不能提交事务，数据回滚。
+
+## 析构函数
+
+return会调用析构函数 exit不会调用局部对象的析构函数 
+
+但如果在调用子函数需要退出程序时，只能使用exit，资源的释放必须采取全局对象
+
 # 实践应用笔记
 
 ## sstream
@@ -6766,7 +6834,7 @@ iostream 标准库支持内存中的输入／输出，只要将流与存储在�
 
 利用sstream可以处理整行读取或单词读取的方式
 
-```
+```c++
 stringstream strm; // 创建自由的 stringstream 对象
 stringstream strm(s); //创建存储 s 的副本的 stringstream 对象，其中 s 是 string 类型的对象
 strm.str()  //返回 strm 中存储的 string 类型对象
@@ -7171,3 +7239,25 @@ struct iterator_traits
 
 ```
 
+## 引用别人的dll或lib
+
+他人提供的动态库文件，包含 .lib 文件和 .dll 文件
+
+在VS的工程中常常要设置头文件的包含路径和库文件的包含路径，当然你可以使用绝对路径，但是如果你这样设置了你只能在你自己的机器上运行该工程；如果其他人拷贝你的工程到其他机器上就可能无法运行，这个是因为你在建工程时可能把工程放在了E:盘，但是其他人可能会把工程放在其他根目录下，这样会导致找不到头文件问题。
+
+
+一：绝对路径的添加方法
+在VS工程中，我们往往会调用他人提供的库文件和头文件，
+
+所以，添加c/c++工程中外部头文件及库的基本步骤：
+
+    1、添加工程的头文件目录（.h 文件）：鼠标右键项目工程---属性---配置属性---c/c++---常规---附加包含目录：添上头文件存放的目录。
+    
+    2、添加文件引用的lib静态库路径：鼠标右键项目工程------属性---配置属性---链接器---常规---附加库目录：添上lib文件存放的目录。
+         然后添加工程引用的lib文件名：鼠标右键项目工程------属性---配置属性---链接器---输入---附加依赖项：添上lib文件名。
+    
+    3、添加工程引用的dll动态库文件：把引用的dll放到项目工程的可执行文件所在的目录下，也就是 .exe文件所在的目录下。
+
+二：相对路径的添加方法
+
+    此处相对路径是相对于该工程文件（XXXX.vcproj）为起点计算出的能找到包含所需头文件（.h文件）的文件夹的路径或包含所需库文件（.lib）的文件夹的路径。
