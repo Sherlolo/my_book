@@ -587,6 +587,7 @@ sighandler_t signal(int signum, sighandler_t handler);
     - SIG_IGN：忽略参数signum所指的信号。
     - 一个自定义的处理信号的函数，信号的编号为这个自定义函数的参数。
     - SIG_DFL：恢复参数signum所指信号的处理方法为默认值。 
+    - 信号处理函数是运行在用户态的
 
 **kill: 向程序发送信号**
 
@@ -2316,6 +2317,9 @@ for (int eventfd=0; eventfd <= maxfd; eventfd++)
 
 select采用水平触发的方式，如果报告了fd后事件没有被处理或数据没有被全部读取，那么下次select会再次报告该fd
 
+- 水平触发（Level Trigger）：如果报告了fd后事件没有处理或者数据没有被全部读取，那么epoll会**立即**再报告该fd 水平触发读取一次就好
+- 边缘触发（Edge Trigger）：如果报告了fd后事件没有处理或者数据没有被全部读取，那么epoll会**下次**再报告该fd(**边沿触发工作模式下，只有下一个新的I/O事件到来时，才会再次发送通知**) 边缘触发需要while循环读取
+
 ## select的api接口
 
 ```c++
@@ -2334,6 +2338,10 @@ int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struc
 
 
 ## select总结
+
+- select先对于传统IO的优化在于：
+    - 让read事件独立为一个线程来处理
+    - 对socket的监听采取：拷贝一份到内核态监听，然后返回触发的数量给用户态
 
 - select 调用需要传入 fd 数组，需要拷贝一份到内核，高并发场景下这样的拷贝消耗的资源是惊人的。（可优化为不复制）
 - select 在内核层仍然是通过遍历的方式检查文件描述符的就绪状态，是个同步过程，只不过无系统调用切换上下文的开销。（内核层可优化为异步事件通知）
@@ -2510,7 +2518,7 @@ int main()
     {
         struct epoll_event events[MAXEVENTS]; // 存放有事件发生的结构数组。
         // 等待监视的socket有事件发生。
-        int infds = epoll_wait(epollfd,events,MAXEVENTS,-1);
+        int infds = epoll_wait(epollfd, events, MAXEVENTS, -1);
 
         // 返回失败。
         if (infds < 0)
@@ -2569,6 +2577,49 @@ int main()
 
 }
 ```
+
+# 进程同步理论
+
+## 生产者消费者问题
+
+![](./img/CS_32.png)
+
+```c++
+//生产者
+int mutex = 1;
+int empty = n;
+int full = 0;
+producer()
+{
+    while(1)
+    {
+        produce an item in nextp; //生产数据
+        P(empty);	//获取空缓冲区
+        P(mutex);	//互斥夹紧
+        add nextp to bufffer;	//将数据放入缓冲区中
+        V(mutex);	//互斥夹紧
+        V(full);	//满缓冲区个数
+    }
+}
+
+//消费者
+consumer()
+{
+    while(1)
+    {
+        P(full);	//获取满缓冲区单元
+        P(mutex);	//互斥夹紧
+        remove an item from buffer;	//从缓冲区中取出数据
+        V(mutex);	//互斥夹紧
+        V(empty);	//空缓冲区数加1
+        consume the item;	//消费sh
+    }
+}
+```
+
+
+
+
 
 # linux接口
 
@@ -2652,3 +2703,568 @@ ssize_t writev(int filedes, const struct iovec* iov, int iovcnt);
 若成功则返回已写的字节数，若出错则返回-1。`writev`以顺序`iov[0]`，`iov[1]`至`iov[iovcnt-1]`从缓冲区中聚集输出数据。`writev`返回输出的字节总数，通常，它应等于所有缓冲区长度之和。
 
 **特别注意：** 循环调用writev时，需要重新处理iovec中的指针和长度，该函数不会对这两个成员做任何处理。writev的返回值为已写的字节数，但这个返回值“实用性”并不高，因为参数传入的是iovec数组，计量单位是iovcnt，而不是字节数，我们仍然需要通过遍历iovec来计算新的基址，另外写入数据的“结束点”可能位于一个iovec的中间某个位置，因此需要调整临界iovec的io_base和io_len。
+
+# Tiny_web_server
+
+![](./img/CS_3.jpg)
+
+## 半同步半反应堆线程池
+
+### 同步I/O模拟proactor模式
+
+- reactor模式：主线程(I/O处理单元)只负责监听文件描述符是否有事件发生，有的话立即通知工作线程(**逻辑单元** )，读写数据、接受新连接及处理客户请求均在工作线程中完成。通常由**同步I/O**实现。
+- proactor模式：主线程和内核负责处理读写数据、接受新连接等I/O操作，工作线程仅负责业务逻辑，如处理客户请求。通常由**异步I/O**实现。
+
+由于异步I/O并不成熟，实际使用较少，本项目使用的是同步I/O模拟实现proactor模式:
+
+>- 主线程往epoll内核事件表注册socket上的读就绪事件。
+>- 主线程调用epoll_wait等待socket上有数据可读
+>- 当socket上有数据可读，epoll_wait通知主线程,主线程从socket循环**读取数据**，直到没有更多数据可读，然后将读取到的数据封装成一个请求对象并插入请求队列。
+>- 睡眠在请求队列上某个工作线程被唤醒，它获得请求对象并处理客户请求，然后往epoll内核事件表中注册该socket上的**写就绪事件**
+>- 主线程调用epoll_wait等待socket可写。
+>- 当socket上有数据可写，epoll_wait通知主线程。主线程往socket上写入服务器处理客户请求的结果。
+
+### 半同步/半反应堆
+
+半同步/半反应堆是一种并发编程模式，并发编程模式有半同步/半异步模式、领导者/追随者模式
+
+半同步/半反应堆模式工作流程
+
+>- 主线程充当异步线程，负责监听所有socket上的事件
+>- 若有新请求到来，主线程接收之以得到新的连接socket，然后往epoll内核事件表中注册该socket上的读写事件
+>- 如果连接socket上有读写事件发生，主线程从socket上接收数据，并将数据封装成请求对象插入到请求队列中
+>- 所有工作线程睡眠在请求队列上，当有任务到来时，通过竞争（如互斥锁）获得任务的接管权
+>- 请求队列将通知某个工作在**同步模式的工作线程**来读取并处理该请求对象
+
+## http连接处理
+
+### http连接基础知识
+
+有限状态机，是一种抽象的理论模型，它能够把有限个变量描述的状态变化过程，以可构造可验证的方式呈现出来。比如，封闭的有向图。
+
+有限状态机可以通过if-else,switch-case和函数指针来实现，从软件工程的角度看，主要是为了封装逻辑。
+
+### http报文处理流程
+
+- 浏览器端发出http连接请求，主线程创建http对象接收请求并将所有数据读入对应buffer，将该对象插入任务队列，工作线程从任务队列中取出一个任务进行处理。
+- 工作线程取出任务后，调用process_read函数，通过主、从状态机对请求报文进行解析。
+- 解析完之后，跳转do_request函数生成响应报文，通过process_write写入buffer，返回给浏览器端。
+
+### 读取报文流程(process_read)
+
+![](./img/CS_1.jpg)
+
+- parese_line(): 分析当前读取到的一行内容的状态
+
+- parse_request_line():对当前行内容进行解析，request_line会将m_check_state变换到下一个处理状态
+
+- do_request(): 解析完成后生成响应报文
+
+    - NO_REQUEST
+
+    - - 请求不完整，需要继续读取请求报文数据
+
+    - GET_REQUEST
+
+    - - 获得了完整的HTTP请求
+
+    - BAD_REQUEST
+
+    - - HTTP请求报文有语法错误
+
+    - INTERNAL_ERROR
+
+    - - 服务器内部错误，该结果在主状态机逻辑switch的default下，一般不会触发
+
+### 读写报文流程(process)
+
+![](./img/CS_2.jpg)
+
+- 主线程监测读写事件，调用`read_once`和`http_conn::write`完成数据的读取与发送。
+- 其中，服务器子线程完成报文的解析与响应，调用`process_read`对其进行解析，根据解析结果`HTTP_CODE`，进入相应的逻辑和模块。
+- process_write() 根据`do_request`的返回状态，服务器子线程调用`process_write`向`m_write_buf`中写入响应报文。
+- http_conn::write 服务器子线程调用`process_write`完成响应报文，随后注册`epollout`事件。服务器主线程检测写事件，并调用`http_conn::write`函数将响应报文发送给浏览器端。
+
+## 定时器处理
+
+### 信号处理函数
+
+信号处理函数中仅仅通过管道发送信号值，不处理信号对应的逻辑，缩短异步执行时间，减少对主程序的影响。
+
+```c++
+//信号处理函数
+void sig_handler(int sig)
+{
+    //为保证函数的可重入性，保留原来的errno
+    //可重入性表示中断后再次进入该函数，环境变量与之前相同，不会丢失数据
+    int save_errno = errno;
+    int msg = sig;
+
+    //将信号值从管道写端写入，传输字符类型，而非整型
+    send(pipefd[1], (char *)&msg, 1, 0);
+
+    //将原来的errno赋值为当前的errno
+    errno = save_errno;
+}
+
+//设置信号处理函数
+void addsig(int sig, void(handler)(int), bool restart = true)
+{
+    //创建sigaction结构体变量
+    struct sigaction sa;
+    sa.sa_handler = handler;
+    if(restart)
+        sa.sa_falgs |= SA_RESTART;
+    sigfillset(&sa.sa_mask);
+    
+    //执行sigaction函数
+    assert(sigaction(sig, &sa, NULL) != -1);
+    
+}
+```
+
+信号通知逻辑
+
+```c++
+ 1//创建管道套接字
+ 2ret = socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd);
+ 3assert(ret != -1);
+ 4
+ 5//设置管道写端为非阻塞，为什么写端要非阻塞？
+ 6setnonblocking(pipefd[1]);
+ 7
+ 8//设置管道读端为ET非阻塞
+ 9addfd(epollfd, pipefd[0], false);
+10
+11//传递给主循环的信号值，这里只关注SIGALRM和SIGTERM
+12addsig(SIGALRM, sig_handler, false);
+13addsig(SIGTERM, sig_handler, false);
+14
+15//循环条件
+16bool stop_server = false;
+17
+18//超时标志
+19bool timeout = false;
+20
+21//每隔TIMESLOT时间触发SIGALRM信号
+22alarm(TIMESLOT);
+23
+24while (!stop_server)
+25{
+26    //监测发生事件的文件描述符
+27    int number = epoll_wait(epollfd, events, MAX_EVENT_NUMBER, -1);
+28    if (number < 0 && errno != EINTR)
+29    {
+30        break;
+31    }
+32
+33    //轮询文件描述符
+34    for (int i = 0; i < number; i++)
+35    {
+36        int sockfd = events[i].data.fd;
+37
+38        //管道读端对应文件描述符发生读事件
+39        if ((sockfd == pipefd[0]) && (events[i].events & EPOLLIN))
+40        {
+41            int sig;
+42            char signals[1024];
+43
+44            //从管道读端读出信号值，成功返回字节数，失败返回-1
+45            //正常情况下，这里的ret返回值总是1，只有14和15两个ASCII码对应的字符
+46            ret = recv(pipefd[0], signals, sizeof(signals), 0);
+47            if (ret == -1)
+48            {
+49                // handle the error
+50                continue;
+51            }
+52            else if (ret == 0)
+53            {
+54                continue;
+55            }
+56            else
+57            {
+58                //处理信号值对应的逻辑
+59                for (int i = 0; i < ret; ++i)
+60                {
+61                    //这里面明明是字符
+62                    switch (signals[i])
+63                    {
+64                    //这里是整型
+65                    case SIGALRM:
+66                    {
+67                        timeout = true;
+68                        break;
+69                    }
+70                    case SIGTERM:
+71                    {
+72                        stop_server = true;
+73                    }
+74                    }
+75                }
+76            }
+77        }
+78    }
+79}
+```
+
+### 定时器使用
+
+服务器首先创建定时器容器链表，然后用统一事件源将异常事件，读写事件和信号事件统一处理，根据不同事件的对应逻辑使用定时器。
+
+具体的，
+
+- 浏览器与服务器连接时，创建该连接对应的定时器，并将该定时器添加到链表上
+- 处理异常事件时，执行定时事件，服务器关闭连接，从链表上移除对应定时器
+- 处理定时信号时，将定时标志设置为true
+- 处理读事件时，若某连接上发生读事件，将对应定时器向后移动，否则，执行定时事件
+- 处理写事件时，若服务器通过某连接给浏览器发送数据，将对应定时器向后移动，否则，执行定时事件
+
+```
+1//定时处理任务，重新定时以不断触发SIGALRM信号
+  2void timer_handler()
+  3{
+  4    timer_lst.tick();
+  5    alarm(TIMESLOT);
+  6}
+  7
+  8//创建定时器容器链表
+  9static sort_timer_lst timer_lst;
+ 10
+ 11//创建连接资源数组
+ 12client_data *users_timer = new client_data[MAX_FD];
+ 13
+ 14//超时默认为False
+ 15bool timeout = false;
+ 16
+ 17//alarm定时触发SIGALRM信号
+ 18alarm(TIMESLOT);
+ 19
+ 20while (!stop_server)
+ 21{
+ 22    int number = epoll_wait(epollfd, events, MAX_EVENT_NUMBER, -1);
+ 23    if (number < 0 && errno != EINTR)
+ 24    {
+ 25        break;
+ 26    }
+ 27
+ 28    for (int i = 0; i < number; i++)
+ 29    {
+ 30        int sockfd = events[i].data.fd;
+ 31
+ 32        //处理新到的客户连接
+ 33        if (sockfd == listenfd)
+ 34        {
+ 35            //初始化客户端连接地址
+ 36            struct sockaddr_in client_address;
+ 37            socklen_t client_addrlength = sizeof(client_address);
+ 38
+ 39            //该连接分配的文件描述符
+ 40            int connfd = accept(listenfd, (struct sockaddr *)&client_address, &client_addrlength);
+ 41
+ 42            //初始化该连接对应的连接资源
+ 43            users_timer[connfd].address = client_address;
+ 44            users_timer[connfd].sockfd = connfd;
+ 45
+ 46            //创建定时器临时变量
+ 47            util_timer *timer = new util_timer;
+ 48            //设置定时器对应的连接资源
+ 49            timer->user_data = &users_timer[connfd];
+ 50            //设置回调函数
+ 51            timer->cb_func = cb_func;
+ 52
+ 53            time_t cur = time(NULL);
+ 54            //设置绝对超时时间
+ 55            timer->expire = cur + 3 * TIMESLOT;
+ 56            //创建该连接对应的定时器，初始化为前述临时变量
+ 57            users_timer[connfd].timer = timer;
+ 58            //将该定时器添加到链表中
+ 59            timer_lst.add_timer(timer);
+ 60        }
+ 61        //处理异常事件
+ 62        else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+ 63        {
+ 64            //服务器端关闭连接，移除对应的定时器
+ 65            cb_func(&users_timer[sockfd]);
+ 66
+ 67            util_timer *timer = users_timer[sockfd].timer;
+ 68            if (timer)
+ 69            {
+ 70                timer_lst.del_timer(timer);
+ 71            }
+ 72        }
+ 73
+ 74        //处理定时器信号
+ 75        else if ((sockfd == pipefd[0]) && (events[i].events & EPOLLIN))
+ 76        {
+ 77            //接收到SIGALRM信号，timeout设置为True
+ 78        }
+ 79
+ 80        //处理客户连接上接收到的数据
+ 81        else if (events[i].events & EPOLLIN)
+ 82        {
+ 83            //创建定时器临时变量，将该连接对应的定时器取出来
+ 84            util_timer *timer = users_timer[sockfd].timer;
+ 85            if (users[sockfd].read_once())
+ 86            {
+ 87                //若监测到读事件，将该事件放入请求队列
+ 88                pool->append(users + sockfd);
+ 89
+ 90                //若有数据传输，则将定时器往后延迟3个单位
+ 91                //对其在链表上的位置进行调整
+ 92                if (timer)
+ 93                {
+ 94                    time_t cur = time(NULL);
+ 95                    timer->expire = cur + 3 * TIMESLOT;
+ 96                    timer_lst.adjust_timer(timer);
+ 97                }
+ 98            }
+ 99            else
+100            {
+101                //服务器端关闭连接，移除对应的定时器
+102                cb_func(&users_timer[sockfd]);
+103                if (timer)
+104                {
+105                    timer_lst.del_timer(timer);
+106                }
+107            }
+108        }
+109       else if (events[i].events & EPOLLOUT)
+110       {
+111           util_timer *timer = users_timer[sockfd].timer;
+112           if (users[sockfd].write())
+113           {
+114                //若有数据传输，则将定时器往后延迟3个单位
+115                //并对新的定时器在链表上的位置进行调整
+116                if (timer)
+117                {
+118                    time_t cur = time(NULL);
+119                    timer->expire = cur + 3 * TIMESLOT;
+120                    timer_lst.adjust_timer(timer);
+121                }
+122            }
+123            else
+124            {
+125                //服务器端关闭连接，移除对应的定时器
+126                cb_func(&users_timer[sockfd]);
+127                if (timer)
+128                {
+129                    timer_lst.del_timer(timer);
+130                }
+131            }
+132       }
+133    }
+134    //处理定时器为非必须事件，收到信号并不是立马处理
+135    //完成读写事件后，再进行处理
+136    if (timeout)
+137    {
+138        timer_handler();
+139        timeout = false;
+140    }
+141}
+```
+
+### 总结
+
+- addfd(epollfd, pipefd[0], false); 首先将管道通信端口给epoll监听
+- addsig(SIGALRM, sig_handler, false); 设置alarm发生的SIGALRM信号处理函数
+    - sig_handler: send(pipefd[1], (char *)&msg, 1, 0); 先管道发生信号字符串
+- epoll监听到sockfd == pipefd[0]时
+    - ret = recv(pipefd[0], signals, sizeof(signals), 0); 从管道读取结果
+    - signals == SIGALRM 判断并处理对应逻辑
+- 最后收到信号 进行处理time_handler() 删除定时器容器中对应的事件 
+
+```c++
+//主线程调用
+void WebServer::eventLoop()
+{
+    bool timeout = false;
+    bool stop_server = false;
+
+    while (!stop_server)
+    {
+        int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
+        if (number < 0 && errno != EINTR)
+        {
+            LOG_ERROR("%s", "epoll failure");
+            break;
+        }
+
+        for (int i = 0; i < number; i++)
+        {
+            int sockfd = events[i].data.fd;
+
+            //处理新到的客户连接
+            if (sockfd == m_listenfd)
+            {
+                bool flag = dealclinetdata();
+                if (false == flag)
+                    continue;
+            }
+            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            {
+                //服务器端关闭连接，移除对应的定时器
+                util_timer *timer = users_timer[sockfd].timer;
+                deal_timer(timer, sockfd);
+            }
+            //处理信号
+            else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN))
+            {
+                bool flag = dealwithsignal(timeout, stop_server);
+                if (false == flag)
+                    LOG_ERROR("%s", "dealclientdata failure");
+            }
+            //处理客户连接上接收到的数据
+            else if (events[i].events & EPOLLIN)
+            {
+                dealwithread(sockfd);
+            }
+            else if (events[i].events & EPOLLOUT)
+            {
+                dealwithwrite(sockfd);
+            }
+        }
+        //处理定时器为非必须事件，收到信号并不是立马处理
+	   //完成读写事件后，再进行处理
+        if (timeout)
+        {
+            utils.timer_handler();
+
+            LOG_INFO("%s", "timer tick");
+
+            timeout = false;
+        }
+    }
+}
+
+//定时器的time_handler
+void sort_timer_lst::tick()
+{
+    if(!head)
+        return;
+    time_t cur = time(NULL);
+    util_timer* tmp = head;
+    while(tmp)
+    {
+        if(cur < tmp->expire)
+            break;
+        tmp->cb_func(tmp->user_data);
+        head = tmp->next;
+        if(head)
+        {
+            head->prev = NULL;
+        }
+        delete tmp;
+        tmp = head;
+    }
+}
+
+//定时处理任务，重新定时以不断触发SIGALRM信号
+//tick会将触发的定时事件删除
+void Utils::timer_handler()
+{
+    m_timer_lst.tick();
+    alarm(m_TIMESLOT);
+}
+```
+
+## 日志系统
+
+### 日志介绍
+
+日志：由服务器自动创建，并记录运行状态，错误信息，访问数据的文件
+
+使用单例模式创建日志系统，对服务器运行状态、错误信息和访问数据进行记录，该系统可以实现按天分类，超行分类功能，可以根据实际情况分别使用同步和异步写入两种方式。
+
+其中异步写入方式，将生产者-消费者模型封装为阻塞队列，创建一个写线程，工作线程将要写的内容push进队列，写线程从队列中取出内容，写入日志文件。
+
+### 单例模式
+
+单例模式作为最常用的设计模式之一，保证一个类仅有一个实例，并提供一个访问它的全局访问点，该实例被所有程序模块共享。
+
+实现思路：
+
+- 懒汉模式，即非常懒，不用的时候不去初始化，所以在第一次被使用时才进行初始化
+- 饿汉模式，即迫不及待，在程序运行时立即初始化‘
+
+```c++
+//懒汉模式
+
+//不使用加锁和解锁操作 
+//该方法 按C++11之前的标准，还是需要加锁
+class single{
+private:
+    single(){}
+    ~single(){}
+public:
+    static single* getinstance();
+}
+
+single* single::getinstance()
+{
+    static single obj;
+    return &obj;
+}
+
+//饿汉模式
+class single{
+private:
+    single(){}
+    ~single(){}
+public:
+    static single* getinstance();
+}
+
+single* single::p = new single();
+single* single::getinstance(){
+    return p;
+}
+int main()
+{
+    
+    
+}
+```
+
+
+
+
+
+## 数据库连接池
+
+### 功能介绍
+
+连接池的功能主要有：
+
+- 初始化
+- 获取连接 : 由于多线程操作连接池，会造成竞争，这里使用互斥锁完成同步
+- 释放连接
+- 销毁连接池：通过迭代器遍历连接池链表，关闭对应数据库连接，清空链表并重置空闲连接和现有连接
+
+**使用RAII机制完成主动释放**
+
+RAII是C++语法体系中的一种常用的合理管理资源避免出现内存泄漏的常用方法。以对象管理资源，利用的就是C++构造的对象最终会被对象的析构函数销毁的原则。RAII的做法是使用一个对象，在其构造时获取对应的资源，在对象生命期内控制对资源的访问，使之始终保持有效，最后在对象析构的时候，释放构造时获取的资源。
+
+```c++
+class connection_pool
+{
+public:
+    static connection_pool* GetInstance();
+private:
+    connection_pool();
+    ~connection_pool();
+}
+
+connection_pool *connection_pool::GetInstance()
+{
+	static connection_pool connPool;
+	return &connPool;
+}
+
+connection_pool::~connection_pool()
+{
+	DestroyPool();
+}
+```
+
+
+

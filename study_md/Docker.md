@@ -223,7 +223,7 @@ docker run [可选参数] image #运行
 ```
 #运行容器 
 docker run -it centos /bin/bash #运行并进入容器centos
-
+ 
 #推出
 exit #退出容器
 Ctrl+P+Q  #不停止容器退出
