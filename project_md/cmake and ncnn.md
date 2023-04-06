@@ -19,9 +19,11 @@
 - 进行release模式编译: cmake --build . -- /p:Configuration=Release 或者 --config Release
 ```
 cmake --build . --config Release --target install -j6
+-DCMAKE_CXX_STANDARD=11 #c++11
 ```
 - cmake install 生成lib和include文件
 - cmake -G "Visual Studio 16 2019" 选择vs19编译
+- -G"MinGW Makefiles"  使用mingw编译
 
 ## 使用案例
 
@@ -32,7 +34,7 @@ cmake  -G "Visual Studio 16 2019" ..
 cmake --build . -j6
 cmake --build . --target install -j6
 //install用于指定在安装时运行的规则。它可以用来安装很多内容，可以包括目标二进制、动态库、静态库以及文件、目录、脚本等：
-//在cmake里编写install 编译时会将对应的lib
+//在cmake里编写install 编译时会install变量名对应的lib编译成一个库
 ```
 
 ```
