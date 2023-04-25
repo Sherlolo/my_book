@@ -1765,12 +1765,61 @@ tuple是类似pair类型的模板，pair恰好只能有两个成员，但一个t
 注意：
 tuple的构造函数时explicit的，所以必须要使用直接初始化语法，不能使用赋值初始化。
 
-```
+```c++
 tuple<string, vector<double>, int> someval("constants", {3.14, 2.718}, 42);
 
 auto book = get<0>(someval);
 auto vec = get<1>(someval);
+
+//结构化绑定 
+auto tup = std::tuple(3, 3.14f, 'h');
+auto [first, second, third] = tup;
+auto& [first, second, third] = tup; //绑定为引用
+
+//解包用户自定义类
+struct MyClass{
+    int x;
+    float y;
+};
+
+int main(){
+    MyClass mc = {42, 3.14f};
+    auto [x, y] = mc;
+    std::cout << x << std::endl;
+    std::cout << y << std::endl;
+    return 0;
+}
 ```
+
+# optional容器
+
+应用场景：本来要返回T类型，但失败还需要指定一个初值返回。
+
+```c++
+#icnldue <optional>
+
+std::optional<float> mysqrt(float x)
+{
+    if(x >= 0.f){
+        return std::sqrt(x);
+    }
+    else{
+        return std::nullopt; //失败返回
+    }
+}
+
+int main()
+{
+    auto ret = mysqrt(3.f);
+    if(ret.has_value()){
+        printf("成功！\n")；
+    }
+    else{
+        printf("失败\n");
+    }
+}
+```
+
 
 
 # 循环和关系表达式
@@ -3568,6 +3617,15 @@ public:
 > 如果不是，在调用拷贝构造函数，我们会拷贝实参，拷贝实参又会调用拷贝构造函数。。。
 >
 > 默认生成的拷贝构造函数，会将所有非动态变量拷贝(深拷贝) 默认赋值时浅拷贝
+
+## {}和()构造函数的区别
+
+类似c类型转换和c++类型转换一样，c++类型转换是非强制的，如果会丢失精度就会报错
+
+```
+int(3.14);//correct
+int(3.14f);//error
+```
 
 
 
@@ -5403,7 +5461,7 @@ std::cout << basker.back()->net_price(15) << std::endl;	//调用Bulk_Quote里面
 ## 抽象基类
 
 - 抽象基类(abstract base class, ABC),即对于两个类，抽象出它们的共性。
-- C++通过使用纯虚函数提供未实现的函数，纯虚函数的结尾是=0。
+- C++通过使用纯虚函数提供未实现的函数，纯虚函数的**结尾是=0**。
 - 当类声明中包含纯虚函数时，不能创建该类的对象,将使基类成为抽象的。
 - 纯虚函数提供定义时，函数体必须定义在类的外部，而不是类的内部。
 
@@ -5451,7 +5509,7 @@ public:
 
 - 多类继承时注意其写法
 
-```
+```c++
 class highfink : public mananger, public fink
 {
 public:
@@ -5468,7 +5526,7 @@ public:
 ```
 
 
-```
+```c++
 //一般情况基类的构造函数没有被继承
 baseDMA::baseDMA(const baseDMA &rs) : DMA(rs) //复制构造函数也需要列表初始化
 {
@@ -6281,6 +6339,15 @@ shared_ptr独有的操作
 |p.unique()|	若p.use_count()是1，返回true；否则返回false|
 |p.use_count()|	返回与p共享对象的智能指针数量；可能很慢，主要用于调试。|
 
+### shared_ptr的循环引用问题
+
+- shared_ptr使用过程中可能造成循环引用问题。双向链表
+- 可以使用weak_ptr解决 弱引用不增加计数器
+- shared_ptr需要维护一个额外的计数器内存 实际效率不比其他智能指针高
+
+
+
+
 
 ### make_shared函数
 
@@ -6464,6 +6531,12 @@ p3 = p2;    //错误
 |u.reset()	|释放u指向的对象|
 |u.reset(q)	|令u指向q指向的对象|
 |u.reset(nullptr)|	将u置空|
+
+### unique_ptr的特性
+
+- unique_ptr：禁止拷贝，允许移动
+- 必须拷贝时，可以使用p.get()转换为原始指针再操作
+- p=nullptr 会自动释放p对象
 
 ### unique_ptr、shared_ptr和动态数组
 
@@ -7204,6 +7277,27 @@ a1.set("temporary str1","temporary str2");
 
 ### 移动构造函数
 
+默认合成的移动构造函数相当于将赋值对象析构 再进行拷贝构造或拷贝赋值
+
+```
+Vector(Vector&& other)
+{
+	m_size = other.m_size;
+	other.m_size = 0;
+	m_data = other.m_data;
+	other.m_data = null;
+}
+
+Vector& operator=(Vector&& other)
+{
+	this->~Vector();
+	new(this) Vector(std::move(other));
+	return *this; 
+}
+```
+
+
+
 ```
 class buffer:
 {
@@ -7235,7 +7329,16 @@ public:
 ### 注意！！！
 
 - 使用右值进行初始化或拷贝时，是否是深拷贝还是浅拷贝，还需看自己定义的移动构造函数
+- std::move只是一个修饰作用，发挥移动效果的在类的移动构造和移动赋值函数里
 - 使用移动构造函数时，需要注意：将右值赋予给一个变量后将变成左值，如果还需要使用移动构造函数，注意加入forward或move.
+
+```c++
+//如下情况会自动调用移动
+return v2; //返回值 调用移动
+v1 = vector<int>(200); //右值或临时变量赋值会调用移动
+```
+
+
 
 ```c++
 int main() {
