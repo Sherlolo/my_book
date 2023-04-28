@@ -7161,6 +7161,18 @@ return会调用析构函数 exit不会调用局部对象的析构函数
 
 # 实践应用笔记
 
+## mem函数系列
+
+```c++
+memcpy(void *str1, const void *str2, size_t n); //拷贝
+memmove(void *str1, const void *str2, size_t n); //移动
+memset(void* str, char c, size_t n);	//设置str所有子节为c
+```
+
+
+
+
+
 ## sstream
 
 iostream 标准库支持内存中的输入／输出，只要将流与存储在程序内存中的 string 对象捆绑起来即可。此时，可使用 iostream 输入和输出操作符读写这个 string 对象。标准库定义了三种类型的字符串流：
