@@ -420,7 +420,7 @@ Docker Hub 中99% 的镜像都是通过在base镜像（Scratch）中安装和配
 
 ### 构建自己的centos
 
-```
+```dockerfile
 #编写dockerfile文件
 FROM centos:centos7
 MAINTAINER sherlolo
@@ -460,10 +460,29 @@ docker login -u 用户名 -p 密码
 docker push sherlolo/centos:0.1 
 
 #修改本地镜像信息 添加用户名
-docker tag  251ca4419332 sherlolo/centos:0.1
+docker tag  251ca4419332 sherlolo/ce`ntos:0.1
 
 
 ```
+
+## 本地发布镜像
+
+```bash
+docker commit -m=“提交的描述信息”  -a="作者" 容器id 目标镜像名:[TAG] 
+
+docker commit -m="add webapps" -a="sherlolo" 2a3bf3eaa2e4 mytomcat:1.0
+
+#镜像保存为本地文件
+docker save -o file.tar imageid(imagenaem)
+
+#修改tag信息
+docker tag  251ca4419332 sherlolo/centos:0.1
+
+#加载镜像
+docker load --input file.tar
+```
+
+
 
 # docker基础命令准备
 

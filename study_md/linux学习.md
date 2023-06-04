@@ -1730,3 +1730,25 @@ do
     ...
 done
 ```
+
+# 安装ohmyzsh
+
+```
+第一步 → 把 oh-my-zsh 项目 Clone 下来：
+git clone https://github.com/robbyrussell/oh-my-zsh.git ~/.oh-my-zsh
+
+第二步 → 复制 .zshrc
+cp ~/.oh-my-zsh/templates/zshrc.zsh-template ~/.zshrc
+
+第三步 → 更改你的默认 Shell
+chsh -s /bin/zsh
+
+~/.zshrc，ZSH_THEME="ys"
+```
+
+> 注意：ohmyzsh和.zshrc需要放到root或者当前用户目录下
+
+# 编译指令
+
+- ldd 该命令用于打印程序或者库文件所依赖的共享库列表
+- objdump -D a.out

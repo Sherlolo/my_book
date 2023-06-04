@@ -380,3 +380,258 @@ scl enable devtoolset-8 bash #切换到gcc 8
 替换make_unique宏
 std::wcout和printf输出不保持一致
 ```
+
+# ncnn源码阅读
+
+## 异常设计
+
+```c++
+int fun();  //异常状态码通过返回值传递
+```
+
+
+
+## 内存构造
+
+ncnn里的内存可根据需要，实现地址16子节对齐。
+
+> 内存对齐的原因：
+>
+> 平台原因：是所有的硬件平台都能访问任意地址上的任意数据的；某些硬件平台只能在某些地址处取某些特定类型的数据，否则抛出硬件异常。
+>
+> 性能原因：数据结构(尤其是栈)应该尽可能地在自然边界上对齐。原因在于，为了访问未对齐的内存，处理器需要作两次内存访问；而对齐的内存访问仅需要一次访问。
+
+
+
+```c++
+#include <bits/stdc++.h>
+
+#define ll long long
+void debug() {
+#ifdef Acui
+  freopen("data.in", "r", stdin);
+  freopen("data.out", "w", stdout);
+#endif
+}
+
+using namespace std;
+
+// the alignment of all the allocated buffers
+#define MALLOC_ALIGN 16
+
+//取>=sz的能被n整除的最小地址
+static inline size_t alignSize(size_t sz, int n) {
+  return (sz + n - 1) & -n;
+}
+
+
+//取>=sz的能被n整除的指针地址
+template<typename _Tp>
+static inline _Tp* alignPtr(_Tp* ptr, int n = (int)sizeof(_Tp)) {
+  return (_Tp*)(((size_t)ptr + n - 1) & -n);
+}
+
+
+static inline void* fastMalloc(size_t size) {
+  unsigned char* udata = (unsigned char*)malloc(size + sizeof(void*) + MALLOC_ALIGN); //为了对齐需多分配一些内存
+  if (!udata)
+    return 0;
+  unsigned char** adata = alignPtr((unsigned char**)udata + 1, MALLOC_ALIGN);	//返回对齐后的子节 (unsigned char**)是为了移动8个子节
+  adata[-1] = udata;	//adata的首位存放最初的地址
+  return adata;
+}
+
+static inline void fastFree(void* ptr) {
+  if (ptr) {
+    unsigned char* udata = ((unsigned char**)ptr)[-1];
+    free(udata);
+  }
+}
+
+int main() {
+  int *a = new int(5);
+  std::cout << "a: " << a << std::endl;
+  std::cout << "(size_t)a: " << (size_t)a << std::endl;
+  std::cout << "(ll)a: " << (ll)a << std::endl;
+
+  size_t totalsize = alignSize(12, 4);
+  size_t totalsize2 = alignSize(17, 4);
+  std::cout << "totalsize: " << totalsize << std::endl;
+  std::cout << "totalsize: " << totalsize2 << std::endl;
+  void* data = fastMalloc(totalsize);
+  fastFree(data);
+  std::cout << "data:         " << data << std::endl;
+  std::cout << "(void*)data:  " << (void*)data << std::endl;
+  std::cout << "(int*)data:   " << (int*)data << std::endl;
+  std::cout << "(float*)data: " << (float*)data << std::endl;
+  return 0;
+}
+```
+
+
+
+## Mat类
+
+内存分配除了矩阵数据外，计数值也分配了
+
+```cpp
+inline void Mat::create(int _w, int _h, int _c)
+{
+    // 第一部分
+    release();
+
+    // 第二部分
+    dims = 3;
+    w = _w;
+    h = _h;
+    c = _c;
+    cstep = alignSize(w * h * sizeof(float), 16) >> 2;	//为了访问下一个通道时的缩进值
+
+    // 第三部分
+    if (total() > 0)
+    {
+        size_t totalsize = total() * sizeof(float);
+        data = (float*)fastMalloc(totalsize + (int)sizeof(*refcount)); //内存分配除了矩阵数据外，计数值也分配了
+        refcount = (int*)(((unsigned char*)data) + totalsize);
+        *refcount = 1;
+    }
+}
+```
+
+
+
+## ncnn网络推理过程
+
+这个大哥小弟的例子还是我写这个文章的时候无意想到的，觉得很有意思。ncnn推理有一个特点，那就是从底往上递归深搜最短路跑的，这个我觉得用大哥小弟来举例子就很好。这里我先写了怕后面忘了。假定有人给了大哥一笔钱，让他把钱分给小弟(用户调用了input方法塞数据了)，等会会有小弟来要钱(用户调用了extract方法要数据)。这时候大哥有两个方案：1.老老实实给每一个小弟发钱，2.哪个小弟要钱单独给他发。考虑到一个复杂的网络，有很多的大哥、中哥、小哥、大第、中弟、小弟。发钱是一级一级往下发，小弟要钱是一级一级往上要，每一个要钱都是要底下所有人的份子。我们分析一下这两个方案：
+
+- 方案一：每个人都发，大家都有钱，有些小弟还不需要钱，你也给他发了
+    - 优点：每个人你都发了，缺钱也别来问，都给你了（直接完整推理，要什么数据取就行了）
+    - 缺点：大哥都发出去了，累死累活的（全部计算量）
+
+- 方案二：来要钱才给他，有些不要钱的不给了
+
+    - 优点：大哥省事，谁要给谁（节省计算量）
+    - 缺点：每个小弟要钱都要往上打报告，大哥再给他们发（取不同节点数据中间需要再推理）
+
+    
+
+源码解析：
+
+```c++
+// 网络加载
+ncnn::Net squeezenet;
+squeezenet.load_param("squeezenet_v1.1.param");
+squeezenet.load_model("squeezenet_v1.1.bin");
+
+// 数据预处理
+ncnn::Mat in = ncnn::Mat::from_pixels_resize(image.data, ncnn::Mat::PIXEL_BGR, image.cols, image.rows, 227, 227);
+const float mean_vals[3] = { 104.f, 117.f, 123.f };
+in.substract_mean_normalize(mean_vals, 0);
+
+// 网络推理
+ncnn::Extractor ex = squeezenet.create_extractor();
+ex.input("data", in);
+ncnn::Mat out;
+ex.extract("prob", out);
+```
+
+
+
+1. ncnn::Extractor或者说是create_extractor，这个其实就是一个专门用来维护推理过程数据的一个类，跟ncnn::Net解耦开，不糊弄到一块而已，这个最主要的就是开辟了一个大小为网络的blob size的std::vector\<ncnn::Mat>来维护计算中间的数据
+2. input，这个更简单，就是在上一步开辟的vector中，把该input的blob的数据in塞进去
+3. extract，这个东西就比较核心了，我们这回主要看这个
+4. 每次运算到blob前的结果都会保存下来。
+
+整体思路：
+
+1. 读取param和bin文件，记录下每一层的layer、layer的输入输出节点、layer的特定参数
+
+2. 推理
+
+3. 1. 维护一个列表用于存所有节点的数据
+
+    2. 给输入节点放入输入数据
+
+    3. 计算输出节点的layer
+
+    4. 1. 计算layer所需的输入节点还没给输入——>递归调用上一层layer计算
+        2. 有输入了——>计算当前layer
+        3. 输出结果
+
+## 卷积计算
+
+卷积计算的小技巧，sun初值赋值成bias，避免二次遍历
+
+使用openmp加速
+
+```cpp
+#pragma omp parallel for num_threads(opt.num_threads)
+for (int p=0; p<num_output; p++)
+    {
+        float* outptr = top_blob.channel(p);
+
+        for (int i = 0; i < outh; i++)
+        {
+            for (int j = 0; j < outw; j++)
+            {
+                float sum = 0.f;
+
+                if (bias_term)
+                    sum = bias_data.data[p]; // 加bias
+
+                const float* kptr = weight_data_ptr + maxk * channels * p;
+
+                // channels
+                for (int q=0; q<channels; q++)
+                {
+                    const Mat m = bottom_blob_bordered.channel(q);
+                    const float* sptr = m.data + m.w * i*stride + j*stride;
+
+                    for (int k = 0; k < maxk; k++)
+                    {
+                        float val = sptr[ space_ofs[k] ];
+                        float w = kptr[k];
+                        sum += val * w; // kernel和feature的乘加操作
+                    }
+
+                    kptr += maxk;
+                }
+
+                outptr[j] = sum;
+            }
+
+            outptr += outw;
+        }
+    }
+```
+
+## 运算加速
+
+- fill使用avx2
+
+```c++
+NCNN_FORCEINLINE void Mat::fill(__m256 _v)
+{
+    int size = (int)total();
+    float* ptr = (float*)data;
+    for (int i = 0; i < size; i++)
+    {
+        _mm256_storeu_ps(ptr, _v);
+        ptr += 8;
+    }
+}
+
+```
+
+- extractor的设计模型
+
+使用指针存放数据
+
+```c++
+class NCNN_EXPORT Extractor
+{
+private:
+    ExtractorPrivate* const d; //存放每次运行的数据
+}
+```
+

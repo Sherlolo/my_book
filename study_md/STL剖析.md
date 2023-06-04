@@ -1251,7 +1251,7 @@ public:
 
 - stack/queue底层是以其他容器来完成所有工作，而具有“修改某物接口，形成另一种特性”的做法，称为**adapter(配接器)**
 - stack/queue都不允许遍历，也不提供iterator
-- stack/queue都可选择list或deque作为底层容器
+- stack/queue都可选择list或deque作为底层容器    
 - stack可选择vector作为底层容器，queue不可选择vector作为底层结构
 
 ### stack/queue实现

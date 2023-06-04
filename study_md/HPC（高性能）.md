@@ -249,3 +249,2687 @@ int main()
 
 ```
 
+# 汇编角度看编译器优化
+
+## 汇编语言
+
+![](./img/HPC_6.png)
+
+常见的汇编有AT&T、intel和arm，其区别如下：
+
+- AT&T 通用的汇编各式，在各类cpu下都可以使用。gcc默认
+- intel只能在x86系列cpu上运行
+- arm：arm公司的汇编格式
+
+## 汇编案例
+
+编译一个汇编语言文件(.s)
+
+```bash
+objdump -D hello #反汇编hello
+objdump -S hello #其反汇编并且将其 C 语言源代码混合
+```
+
+
+
+```bash
+#生成汇编语言
+gcc -fomit-frame-pointer -fverbose-asm -S main.cpp -o main.S
+-fomit-frame-pointer(生成更简洁) -fverbose-asm(提升源代码在哪)
+
+#使用-O3优化代码结构
+gcc -O3 -fomit-frame-pointer -fverbose-asm -S main.cpp -o main.S
+```
+
+### 使用lead优化加乘运算
+
+```cpp
+int fun(int a, int b)
+{
+	return a + 8 * b;
+}
+//使用-O3优化成汇编如下
+leal (%rdi, %rsi, 8), %eax # eax = rdi + rsi * 8
+```
+
+### 指针索引尽量使用size_t
+
+```cpp
+int fun(int* a, std::size_t b)
+{
+    return a[b]; //如果不是会将b放到寄存器上
+}
+```
+
+### addss指令
+
+addss指令含义：
+
+- add表示加法操作
+- 第一个 s 表示标量(scalar)，只对 xmm 的最低位进行运算；也可以是 p 表示矢量(packed)，一次对 xmm 中所有位进行运算。
+- 第二个 s 表示单精度浮点数(single)，即 float 类型；也可以是 d 表示双精度浮点数(double)，即 double 类型。
+
+> addss:一个float加法		addps:四个float加法
+>
+> addsd:一个double加法	addpd:两个double加法
+
+## 编译器化简
+
+编译器优化主要针对在栈上的变量。如：array, bitset, glm::vec, string_viewpair, tuple, optional, variant
+
+### 常数化简
+
+```cpp
+int fun()
+{
+ 	int a = 32;
+ 	int b = 10;
+ 	return a + b;
+}
+//化简后
+movl $42, %eax //作为常数返回
+    
+int func()
+{
+    int ret = 0;
+    for(int i = 1; i <= 100; ++i)
+        ret += i;
+   	return ret;
+}
+
+//简单的for循环可优化 返回成常数5050返回
+```
+
+## 内联
+
+### 多个函数定义在不同文件
+
+- @PLT 是 Procedure Linkage Table 的缩写，即函数链接表。链接器会查找其他 .o 文件中是否定义了 _Z5otheri 这个符号，如果定义了则把这个 @PLT 替换为他的地址。
+- O3优化后可以将call编程jmp 直接跳转到地址
+
+### 多个函数定义在同一个文件
+
+- 如果 _Z5otheri 定义在同一个文件中，编译器会直接调用，没有 @PLT 表示未定义对象。减轻了链接器的负担。
+- 内联：当编译器看得到被调用函数（other）实现的时候，会直接把函数实现贴到调用他的函数（func）里
+- `call`（Call）指令也是跳转指令，但它是有条件的。`call` 指令将当前指令的地址压入栈中，并跳转到指定的地址(需要查找)。当被调用的程序执行完毕后，可以使用 `ret`（Return）指令返回到调用它的程序。
+- `jmp`（Jump）指令是无条件跳转指令，它可以将程序执行的控制权转移到指定的地址，不考虑当前的程序状态。例如：
+- O3优化可以使call优化成jmp
+
+## 指针优化
+
+```cpp
+void func(int *a, int *b, int *c)
+{
+	*c = *a;
+    *c = *b;
+}
+//是否优化*c = *b;
+//如果b和c指向同一变量
+优化前b=a;
+优化后b=b;
+```
+
+### volatile（禁止优化）
+
+加了 volatile 的对象，编译器会放弃优化对他的读写操作。直接从地址读取
+
+### __restrict关键字（优先优化）
+
+__restrict 是一个提示性的关键字，是程序员向编译器保证：这些指针之间不会发生重叠！从而他可以放心地优化成功：
+
+## 矢量化
+
+使用SIMD将多次运算变成一个矢量运算
+
+**-march=native** 让编译器自动判断当前硬件支持的指令。
+
+```cpp
+for(int i = 0; i < n; ++i)
+	a[i] = 0;
+//优化成memcpy
+```
+
+### 指针对齐
+
+C++20 引入了标准化的 std::assume_aligned
+
+```cpp
+a = std::assume_aligned<16>(a); //16子节对齐
+```
+
+## 循环
+
+   对于不同类型的指针
+
+```cpp
+void func(float* a, float *b)
+{
+	for(int i = 0; i < 1024; ++i)
+        a[i] = b[i] + 1;
+}
+```
+
+考虑到func(a, a+1)的情况，不能simd化，所以编译器会生成两份代码：
+
+- 没有重叠，跳转到SIMD高效运行
+- 重叠，则会跳转到标量版本低效运行
+
+为了强制矢量化，改成如下代码：
+
+```cpp
+void func(float* __restrict a, float * __restrict b)
+{
+	for(int i = 0; i < 1024; ++i)
+        a[i] = b[i] + 1;
+}
+
+//或者使用宏处理
+//编译加入 -fopenmp
+void func(float* __restrict a, float * __restrict b)
+{
+#pragma omp simd
+	for(int i = 0; i < 1024; ++i)
+        a[i] = b[i] + 1;
+}
+```
+
+### 循环中的if移动到外面
+
+有 if 分支的循环体是难以 SIMD 矢量化的。
+
+### 循环中的不变量挪到外面运算
+
+```cpp
+void func(float *a, float *b, float dt)
+{
+	for(int i = 0; i < 1024; ++i)
+        a[i] = a[i] + b[i]*dt*dt;
+}
+```
+
+然而只要去掉 (dt * dt) 的括号就会优化失败：因为乘法是左结合的，就相当于 (b[i] * dt) * dt编译器识别不到不变量，从而优化失败。
+
+因此，要么帮编译器打上括号帮助他识别，要么手动提取不变量到循环体外
+
+### 循环调用另一个文件的函数
+
+循环调用另一个文件的函数会导致优化失败
+
+避免在 for 循环体里调用外部函数，把他们移到同一个文件里，或者放在头文件声明为 static 函数。
+
+```cpp
+void other()
+{
+
+}
+
+float func(float *a)
+{
+    float ret = 0;
+    for(int i = 0; i < 1024; ++i)
+    {
+        ret += a[i];
+        other;
+    }
+    return ret;
+}
+```
+
+### 循环展开优化速度
+
+背景：每次执行循环体 a[i] = 1后，都要进行一次判断 i < 1024。导致一部分时间花在判断是否结束循环，而不是循环体里
+
+对于 GCC 编译器，可以用#pragma GCC unroll 4表示把循环体展开为4个
+
+对小的循环体进行 unroll 可能是划算的，但最好不要 unroll 大的循环体，否则会造成指令缓存的压力反而变慢！
+
+```cpp
+void func(float* a)
+{
+#pragma GCC unroll 4
+    for(int i = 0; i < 1024; ++i)
+        a[i] = 1;
+}
+
+//gcc unrool 4后类似如下
+void func(float* a)
+{
+    for(int i = 0; i < 1024; i += 4)
+    {
+        a[i+0]; a[i+1]; a[i+2]; a[i+3];
+    }
+}
+```
+
+## 结构体
+
+如果结构体没有8子节或者16子节对齐可能无法矢量化
+
+```cpp
+//填充子节使之16子节对齐
+struct MyVec{
+    float x;
+    float y;
+    float z;
+    char padding[4];
+};
+
+//c++11 使用alignas填充对齐
+struct alignas(16) MyVec{
+    float x;
+    float y;
+    float z;
+};
+
+
+//结构体定义在内部 会直接优化为返回 因为函数内不允许外部
+#define N 1024
+struct  Point{
+    float x;
+    float y;
+    float z;
+    char tmp[4];
+};
+void compute(int* a, int n){
+    Point ps[N];
+    for(int i = 0; i < N; ++i)
+        ps[i].x = ps[i].x + ps[i].y + ps[i].z;
+}
+```
+
+### 结构体的内存布局
+
+- AOS（Array of Struct）单个对象的属性紧挨着存储
+- SOA（Struct of Array）属性分离存储在多个数组
+
+![](./img/HPC_7.png)
+
+SOA不符合面向对象编程 (OOP) 的习惯，但常常有利于性能。又称之为面向数据编程 (DOP)。
+
+```cpp
+struct MyVec{
+    float x[1024];
+    float y[1024];
+    float z[1024];
+};
+
+void func(){
+	for(int i = 0; i < 1024; ++i)
+		a.x[i] *= a.y[i];
+}
+```
+
+## stl容器
+
+stl容器也会存在指针别名问题，且restrict不可解决
+
+使用pragma omp simd 或 pragma GCC ivdep让编译器优化
+
+### vector也能实现SOA
+
+```cpp
+//需保证xyz三个vector是同样大小的
+#include <vector>
+struct MyVec{
+  std::vector<float> x;
+  std::vector<float> y;
+  std::vector<float> z; 
+};
+MyVec a
+void func()
+{
+    for(std::size_t i = 0; i < a.x.size(); ++i)
+        a.x[i] *= a.y[i];
+}
+
+```
+
+## 数学运算
+
+- -ffast-math：选项让 GCC 更大胆地尝试浮点运算的优化，有时能带来 2 倍左右的提升。作为代价，他对 NaN 和无穷大的处理，可能会和 IEEE 标准（腐朽的）规定的不一致。如果你能保证，程序中永远不会出现 NaN 和无穷大，那么可以放心打开 -ffast-math。
+- 数学函数请加 std:: 前缀
+
+```cpp
+sqrt //只接受double
+sqrtf //只接受float
+std::sqrt //自适应接受函数参数
+```
+
+```cpp
+#include <cmath>
+
+
+for (int j = 0; j < 1024; j++) {
+	c[i] += a[i] * b[j]; //b
+}
+
+void func(float *a, float *b, float *c) {
+    for (int i = 0; i < 1024; i++) {
+        float tmp = c[i];
+        for (int j = 0; j < 1024; j++) {
+            tmp += a[i] * b[j]; //b
+        }
+        c[i] = tmp;
+    }
+}
+
+
+void func(float *a, float *b, float *c) {
+    for (int i = 0; i < 1024; i++) {
+        float tmp = 0;
+        for (int j = 0; j < 1024; j++) {
+            tmp += a[i] * b[j];
+        }
+        c[i] += tmp; //精度会更高 0.00001加10000000000可能值不变
+    }
+}
+
+```
+
+## 对应cmake选项
+
+| gcc opt                   | cmake opt                                                    |
+| ------------------------- | ------------------------------------------------------------ |
+| -O3                       | set(CMAKE_BUILD_TYPE Release)                                |
+| -fopenmp                  | find_package(OpenMP REQUIRED)<br />target_link_libraries(main PUBLIC OpenMP::OpenMP_CXX) |
+| -ffast-math/-march=native | target_compile_options(main PUBLIC -ffast-math -march=native) |
+
+
+
+## 总结
+
+- 函数尽量写在同一个文件内
+- 避免在 for 循环内调用外部函数
+- 非 const 指针加上 __restrict 修饰
+- 试着用 SOA 取代 AOS
+- 对齐到 16 或 64 字节
+- 简单的代码，不要复杂化
+- 试试看 #pragma omp simd
+- 循环中不变的常量挪到外面来
+- 对小循环体用 #pragma unroll
+- -ffast-math 和 -march=native
+- size_t访问下标
+
+# c++11多线程编程
+
+time
+
+```cpp
+//C++11映入std::chrono
+//时间点类型：chrono::steady_clock::time_point 等
+//时间段类型：chrono::milliseconds，chrono::seconds，chrono::minutes 等
+//方便的运算符重载：时间点+时间段=时间点，时间点-时间点=时间段
+#include <chrono>
+auto t0 = chrono::steady_clock::now();                            // 获取当前时间点
+auto t1 = t0 + chrono::seconds(30);                                 // 当前时间点的30秒后
+auto dt = t1 - t0;                                                                // 获取两个时间点的差（时间段）
+int64_t sec = chrono::duration_cast<chrono::seconds>(dt).count();  // 时间差的秒数
+
+```
+
+
+
+## 多线程
+
+使用std::thread创建线程
+
+```cpp
+#include <thread>
+void dowload(std::string file);
+int main()
+{
+    std::thread t1([&]{
+        download("hello.zip");
+    });
+    t1.detach(); //移到后台运行，分离后在线程退出以后自动销毁自己
+    t1.join();	//等待该线程结束
+}
+```
+
+构造一个线程池
+
+```cpp
+class Threadpool{
+    std::vector<std::thread> m_pool;
+public:
+    void push_back(std::thread&& thr){
+        m_pool.push_back(std::move(thr));
+    }
+    ~Threadpool(){
+		for(auto &t : m_pool) t.join();
+    }
+}
+
+Threadpool tpool;
+
+void myfunc()
+{
+ 	std::thread t1([&]{
+        download("hello.zip");
+    });
+    tpool.push_back(std::move(t1));	//移交给线程池控制
+}
+```
+
+c++20后引入了std::jthread类（符合RAII思想），解构自动join()
+
+
+
+## 异步
+
+- std::async接受一个带返回值的 lambda，自身返回一个 std::future 对象
+- lambda 的函数体将在另一个线程里执行
+- lambda会在后台运行，main函数可以执行其他任务
+- 最后调用 future 的 get() 方法，如果此时 download 还没完成，会等待 download 完成，并获取 download 的返回值。
+
+```cpp
+#include <iostream>
+#include <string>
+#include <thread>
+#include <future>
+
+int download(std::string file) {
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Downloading " << file
+                  << " (" << i * 10 << "%)..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+    std::cout << "Download complete: " << file << std::endl;
+    return 404;
+}
+
+void interact() {
+    std::string name;
+    std::cin >> name;
+    std::cout << "Hi, " << name << std::endl;
+}
+
+int main() {
+    std::future<int> fret = std::async([&] {
+        return download("hello.zip"); 
+    });
+    interact();
+    int ret = fret.get();
+    std::cout << "Download result: " << ret << std::endl;
+    return 0;
+}
+
+```
+
+### future的一些方法
+
+- get() 等待执行完毕，并返回函数值
+- wait() 等待执行完毕，不返回函数值
+- wait_for(time) 指定一个最长等待时间，没执行完future_status::timeout，执行完future_status::ready
+- wait_untill()同上，参数为一个时间点
+
+```cpp
+#include <iostream>
+#include <string>
+#include <thread>
+#include <future>
+
+int download(std::string file) {
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Downloading " << file
+                  << " (" << i * 10 << "%)..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+    std::cout << "Download complete: " << file << std::endl;
+    return 404;
+}
+
+void interact() {
+    std::string name;
+    std::cin >> name;
+    std::cout << "Hi, " << name << std::endl;
+}
+
+int main() {
+    std::future<int> fret = std::async([&] {
+        return download("hello.zip"); 
+    });
+    interact();
+    while (true) {
+        std::cout << "Waiting for download complete..." << std::endl;
+        auto stat = fret.wait_for(std::chrono::milliseconds(1000)); //设置最长等待时间
+        if (stat == std::future_status::ready) {
+            std::cout << "Future is ready!!" << std::endl;
+            break;
+        } else {
+            std::cout << "Future not ready!!" << std::endl;
+        }
+    }
+    int ret = fret.get();
+    std::cout << "Download result: " << ret << std::endl;
+    return 0;
+}
+```
+
+### async惰性求值
+
+std::async的第一个参数设置为deferred，此时lambda函数会推迟到get()调用时运行
+
+`std::async(std::launch::deferred, [&] {return download("hello.zip"); `
+
+```cpp
+#include <iostream>
+#include <string>
+#include <thread>
+#include <future>
+
+int download(std::string file) {
+    for (int i = 0; i < 10; i++) {
+        std::cout << "Downloading " << file
+                  << " (" << i * 10 << "%)..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+    std::cout << "Download complete: " << file << std::endl;
+    return 404;
+}
+
+void interact() {
+    std::string name;
+    std::cin >> name;
+    std::cout << "Hi, " << name << std::endl;
+}
+
+int main() {
+    std::future<int> fret = std::async(std::launch::deferred, [&] {
+        return download("hello.zip"); 
+    });
+    interact();
+    int ret = fret.get();
+    std::cout << "Download result: " << ret << std::endl;
+    return 0;
+}
+
+```
+
+### std::async 的底层实现：std::promise
+
+如果不想让 std::async 帮你自动创建线程，想要手动创建线程，可以直接用 std::promise。
+
+```cpp
+int main() {
+    std::promise<int> pret;
+    std::thread t1([&] {
+        auto ret = download("hello.zip");
+        pret.set_value(ret); //设置返回值
+    });
+    std::future<int> fret = pret.get_future();
+
+    interact();
+    int ret = fret.get();
+    std::cout << "Download result: " << ret << std::endl;
+
+    t1.join();
+    return 0;
+}
+
+//future不能直接拷贝，需要使用share_future
+int main() {
+    std::shared_future<void> fret = std::async([&] {
+        download("hello.zip"); 
+    });
+    auto fret2 = fret;
+    auto fret3 = fret;
+    interact();
+    fret3.wait();
+    std::cout << "Download completed" << std::endl;
+    return 0;
+}
+```
+
+## 互斥量
+
+多个线程同时访问同一个 vector 会出现数据竞争（data-race）现象。
+
+vector 不是多线程安全（MT-safe）的容器
+
+| mutex                                                        | lock（RAII）                                                 |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| std::mutex m;;<br />m.lock(); m.unlock();                    | std::lock_guard grd(m)<br />std::unique_lock grd(m); //可提前grd.unlock() |
+| std::shared_mutex m;<br />m.lock_shared();m.unlock_shared(); | std::shared_lock grd(m) //读<br />std::unique_lock grd(m); //写 |
+
+
+
+### std::mutex
+
+lock()加锁，unlock()解锁
+
+```c++
+#include <mutex>
+int main() {
+    std::vector<int> arr;
+    std::mutex mtx;
+    std::thread t1([&] {
+        for (int i = 0; i < 1000; i++) {
+            mtx.lock();
+            arr.push_back(1);
+            mtx.unlock();
+        }
+    });
+    std::thread t2([&] {
+        for (int i = 0; i < 1000; i++) {
+            mtx.lock();
+            arr.push_back(2);
+            mtx.unlock();
+        }
+    });
+    t1.join();
+    t2.join();
+    return 0;
+}
+```
+
+### std::lock_guard
+
+根据 RAII 思想，可将锁的持有视为资源，上锁视为锁的获取，解锁视为锁的释放。
+
+std::lock_guard 就是这样一个工具类，他的构造函数里会调用 mtx.lock()，解构函数会调用 mtx.unlock()。
+
+```cpp
+#include <mutex>
+int main()
+{
+    std::mutex mtx;
+    std::vector<int> arr;
+    std::thread t1[&]{
+        for(int i = 0; i < 100; ++i)
+        {
+            std::lock_guard grd(mtx);
+            arr.push_back(1);
+        }
+    }
+    std::thread t2[&]{
+        for(int i = 0; i < 100; ++i)
+        {
+            std::lock_guard grd(mtx);
+            arr.push_back(1);
+        }
+    }
+}
+```
+
+### std::unique_lock
+
+unique_lock相比较lock_guard可以提前unlock()
+
+unique_lock可以加入defer_lock，需要手动加入lock
+
+```cpp
+int main() {
+    std::vector<int> arr;
+    std::mutex mtx;
+    std::thread t1([&] {
+        for (int i = 0; i < 1000; i++) {
+            std::unique_lock grd(mtx);
+            arr.push_back(1);
+        }
+    });
+    std::thread t2([&] {
+        for (int i = 0; i < 1000; i++) {
+            std::unique_lock grd(mtx, std::defer_lock);
+            printf("before the lock\n");
+            grd.lock();
+            arr.push_back(2);
+            grd.unlock();
+            printf("outside of lock\n");
+        }
+    });
+    t1.join();
+    t2.join();
+    return 0;
+}
+```
+
+### try_lock()和try_lock_for()无阻塞
+
+- lock()会等待直到解锁
+- try_lock()无阻塞，上锁失败直接返回false,成功返回true
+- tyr_lock_for(times)会等待一段时间才返回
+
+```cpp
+#include <mutex>
+
+int main()
+{
+    std::mutex mt1;
+    if(mt1.try_lock())
+        std::cout << "success";
+   	else
+        std::cout << "failed";
+}
+```
+
+## 死锁
+
+双方都在等着对方释放锁，但是因为等待而无法释放锁，从而要无限制等下去。这种现象称为死锁
+
+### 解决1：永远不要同时持有两个锁
+
+最为简单的方法，就是一个线程永远不要同时持有两个锁
+
+### 解决2：保证双方上锁顺序一致
+
+其实，只需保证双方上锁的顺序一致，即可避免死锁
+
+### 解决3：用 std::lock 同时对多个上锁
+
+如果没办法保证上锁顺序一致，可以用标准库的 std::lock(mtx1, mtx2, ...) 函数，一次性对多个 mutex 上锁
+
+他接受任意多个 mutex 作为参数，并且他保证在无论任意线程中调用的顺序是否相同，都不会产生死锁问题
+
+```cpp
+#inlcude <thread>
+#include <mutex>
+
+int main()
+{
+    std::mutex mt1;
+    std::mutex mt2;
+    
+    std::thread t1([&]{
+        for(int i = 0; i < 100; ++i)
+        {
+            std::lock(mt1, mt2);
+            mt1.unlock();
+            mt2.unlock();
+        }
+    });
+    std::thread t2([&]{
+        for(int i = 0; i < 100; ++i)
+        {
+            std::lock(mt1, mt2);
+            mt2.unlock();
+            mt1.unlock();
+        }
+    });
+    
+    t1.join();
+    t2.join();
+    return 0;
+}
+```
+
+### std::lock 的 RAII 版本：std::scoped_lock
+
+和 std::lock_guard 相对应，std::lock 也有 RAII 的版本 std::scoped_lock。只不过他可以同时对多个 mutex 上锁。
+
+```c++
+#inlcude <thread>
+#include <mutex>
+
+int main()
+{
+    std::mutex mt1;
+    std::mutex mt2;
+    
+    std::thread t1([&]{
+        for(int i = 0; i < 100; ++i)
+        {
+            std::scoped_lock grd(mt1, mt2);
+        }
+    });
+    std::thread t2([&]{
+        for(int i = 0; i < 100; ++i)
+        {
+            std::scoped_lock grd(mt1, mt2);
+        }
+    });
+    t1.join();
+    t2.join;
+    return 0;
+}
+```
+
+### 同一个进程死锁
+
+**同一线程重复调用lock()也造成死锁**
+
+```c++
+#include <mutex>
+
+std::mutex mt1;
+
+void other()
+{
+    mt1.lock();
+    mt1.unlock();
+}
+
+void func()
+{
+    mt1.lock();
+    other(); //函数里面上锁会无线等待
+    mt1.unlock();
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+```
+
+### 解决1：other 里不要再上锁
+
+### 解决2：改用 std::recursive_mutex
+
+如果实在不能改的话，可以用 std::recursive_mutex。他会自动判断是不是同一个线程 lock() 了多次同一个锁，如果是则让计数器加1，之后 unlock() 会让计数器减1，减到0时才真正解锁。但是相比普通的 std::mutex 有一定性能损失。
+
+```c++
+#include <mutex>
+std::recursive_mutex mtx1;
+void other()
+{
+    mt1.lock();//是同一个线程会让计数器加1
+    mt1.unlock();
+}
+
+void func()
+{
+    mt1.lock();
+    other(); 
+    mt1.unlock();
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+```
+
+## 数据结构
+
+### 封装一个线程安全的vector
+
+```c++
+class MyVector{
+    std::vector<int> arr;
+    mutable std::mutex mtx; //在const函数里也可改变
+public:
+    void push_back(int val)
+    {
+        mtx.lock();
+        arr.push_back(val);
+        mtx.unlock();
+    }
+    size_t size() const
+    {
+        mtx.lock();
+        size_t ret = arr.size();
+        mtx.unlock();
+        return ret;
+	}
+}
+```
+
+### 读写锁 std::shared_mutex
+
+读可以共享，写必须独占，且写和读不能共存，这就是读写锁。
+
+因此提供std::shared_mutex:
+
+- 写：使用lock和unlock的组合
+- 读：使用lock_shared和unlock_shared的组合
+
+```cpp
+class MyVector{
+    std::vector<int> arr;
+    mutable std::shared_mutex mtx; //在const函数里也可改变
+public:
+    void push_back(int val)
+    {
+        mtx.lock();
+        arr.push_back(val);
+        mtx.unlock();
+    }
+    size_t size() const
+    {
+        mtx.lock_shared();
+        size_t ret = arr.size();
+        mtx.unlock_shared();
+        return ret;
+	}
+}
+```
+
+
+
+### std::shared_lock: 符合 RAII 思想的 lock_shared()
+
+正如 std::unique_lock 针对 lock()，也可以用 std::shared_lock 针对 lock_shared()。
+
+shared_lock 同样支持 defer_lock 做参数，owns_lock() 判断等
+
+```cpp
+class MyVector{
+    std::vector<int> arr;
+    mutable std::shared_mutex mtx; //在const函数里也可改变
+public:
+    void push_back(int val)
+    {
+        std::unique_lock grd(mtx); //unique
+        arr.push_back(val);
+    }
+    size_t size() const
+    {
+        std::shared_lock grd(mtx); //shared
+        size_t ret = arr.size();
+        return ret;
+	}
+}
+```
+
+## 访问者模式
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <mutex>
+
+class MTVector {
+    std::vector<int> m_arr;
+    std::mutex m_mtx;
+
+public:
+    class Accessor {
+        MTVector &m_that;
+        std::unique_lock<std::mutex> m_guard; 
+
+    public:
+        Accessor(MTVector &that)
+            : m_that(that), m_guard(that.m_mtx)
+        {}
+
+        void push_back(int val) const {
+            return m_that.m_arr.push_back(val);
+        }
+
+        size_t size() const {
+            return m_that.m_arr.size();
+        }
+    };
+
+    Accessor access() {
+        return {*this};
+    }
+};
+
+int main() {
+    MTVector arr;
+
+    std::thread t1([&] () {
+        auto axr = arr.access(); //使用acc类访问 access类中的unique会z'd
+        for (int i = 0; i < 1000; i++) {
+            axr.push_back(i);
+        }
+    });
+
+    std::thread t2([&] () {
+        auto axr = arr.access();
+        for (int i = 0; i < 1000; i++) {
+            axr.push_back(1000 + i);
+        }
+    });
+
+    t1.join();
+    t2.join();
+
+    std::cout << arr.access().size() << std::endl;
+
+    return 0;
+}
+
+```
+
+## 条件变量
+
+### 基础
+
+`std::condition_variable`和`std::unique_lock<std::mutex>`一起使用实现条件变量控制
+
+```c++
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+
+int main()
+{
+    std::condition_variable cv;
+    std::mutex mtx;
+    std::thread t1([&]{
+        std::unique_lock lck(mtk);
+        cv.wait(lck);
+    });
+    std::cout << "t1 is awake" << std::endl;
+    cv.notify_one();	//唤醒线程
+    t1.join();
+    return 0;
+}
+```
+
+- 还可以额外指定一个参数，变成 cv.wait(lck, expr) 的形式，其中 expr 是个 lambda 表达式，只有其返回值为 true 时才会真正唤醒，否则继续等待
+
+```c++
+int main()
+{
+    std::condition_variable cv;
+    std::mutex mtx;
+    bool ready = false;
+    std::thread t1([&]{
+        std::unique_lock lck(mtk);
+        cv.wait(lck, [&] {return ready;});
+        lck.unlock();
+        std::cout << "t1 is awake" << std::endl;
+    });;
+    
+    std::cout << "not ready" << std::endl;
+    cv.notify_one();
+    
+    ready=ture;
+    std::cout << "ready" << std::endl;
+    cv.notif_one();
+     
+    t1.join();
+    return 0;
+}
+```
+
+### 多个等待者
+
+- cv.notify_one() 只会唤醒其中一个等待中的线程，而 cv.notify_all() 会唤醒全部。
+- 这就是为什么 wait() 需要一个 unique_lock 作为参数，因为要保证多个线程被唤醒时，只有一个能够被启动。如果不需要，在 wait() 返回后调用 lck.unlock() 即可
+- 顺便一提，wait() 的过程中会暂停 unlock() 这个锁。
+
+### 案例 实现生产者消费者模式
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <condition_variable>
+
+template <typename T>
+class MTQueue{
+    std::condition_variable m_cv;
+    std::mutex m_mtx;
+    std::vector<T> m_arr;
+public:
+    T pop(){
+        std::unique_lock lck(m_mtx);
+        m_cv.wait(lck, [this] {return !m_arr.empty();});
+        T ret = std::move(m_arr.back());
+        m_arr.pop_back();
+        return ret;
+    }
+
+    auto pop_hold(){
+        std::unique_lock lck(m_mtx);
+        m_cv.wait(lck, [this] {return !m_arr.empty();});
+        T ret = std::move(m_arr.back());
+        m_arr.pop_back();
+        return std::pair(std::move(ret), std::move(lck));
+    }
+
+    void push(T val){
+        std::unique_lock lck(m_mtx);
+        m_arr.push_back(std::move(val));
+        m_cv.notify_one();
+    }
+
+    void push_many(std::initializer_list<T> vals) {
+        std::unique_lock lck(m_mtx);
+        std::copy(
+                 std::move_iterator(vals.begin()),
+                 std::move_iterator(vals.end()),
+                 std::back_insert_iterator(m_arr));
+        m_cv.notify_all();
+    }
+};
+
+int main(){
+    MTQueue<int> foods;
+    std::thread t1([&]{
+        for(int i = 0; i < 2; ++i){
+            auto food = foods.pop();
+            std::cout << "t1 got food " << food << std::endl;
+        }
+    });
+
+    std::thread t2([&]{
+        for(int i = 0; i < 2; ++i){
+            auto food = foods.pop();
+            std::cout << "t2 got food " << food << std::endl;
+        }
+    });
+    foods.push(42);
+    foods.push(233);
+    foods.push_many({666, 4399});
+
+    t1.join();
+    t2.join();
+    return 0;
+    
+}
+```
+
+
+
+## 原子操作
+
+原子操作即不可分离，多线程运行时必须执行完才会执行其他线程
+
+```c++
+//案列
+//下面代码可以避免冲突问题
+//问题：mutex 太过重量级，他会让线程被挂起，从而需要通过系统调用，进入内核层，调度到其他线程执行，有很大的内核态和用户态转换开销。
+#include <iostream>
+#include <thread>
+#include <mutex>
+
+int main() {
+    std::mutex mtx;
+    int counter = 0;
+
+    std::thread t1([&] {
+        for (int i = 0; i < 10000; i++) {
+            mtx.lock();
+            counter += 1;
+            mtx.unlock();
+        }
+    });
+
+    std::thread t2([&] {
+        for (int i = 0; i < 10000; i++) {
+            mtx.lock();
+            counter += 1;
+            mtx.unlock();
+        }
+    });
+
+    t1.join();
+    t2.join();
+
+    std::cout << counter << std::endl;
+
+    return 0;
+}
+```
+
+### 使用atomic实现原子操作
+
+因此可以用更轻量级的 atomic，对他的 += 等操作，会被编译器转换成专门的指令。
+
+CPU 识别到该指令时，会锁住内存总线，放弃乱序执行等优化策略（将该指令视为一个同步点，强制同步掉之前所有的内存操作），从而向你保证该操作是原子 (atomic) 的（取其不可分割之意），不会加法加到一半另一个线程插一脚进来
+
+对于程序员，只需把 int 改成 atomic<int> 即可，也不必像 mutex 那样需要手动上锁解锁，因此用起来也更直观。
+
+原子型运算：
+
+`+= -= &= |= ++ --`
+
+```cpp
+//使用原子操作
+int main() {
+    std::atomic<int> counter = 0;
+
+    std::thread t1([&] {
+        for (int i = 0; i < 10000; i++) {
+            counter += 1;
+        }
+    });
+
+    std::thread t2([&] {
+        for (int i = 0; i < 10000; i++) {
+            counter += 1;
+        }
+    });
+
+    t1.join();
+    t2.join();
+
+    std::cout << counter << std::endl;
+
+    return 0;
+}
+```
+
+### atomic库的函数
+
+可以看到其中 compare_exchange_strong 的逻辑最为复杂，一般简称 CAS (compare-and-swap)，他是并行编程最常用的原子操作之一。实际上任何 atomic 操作，包括 fetch_add，都可以基于 CAS 来实现：这就是 Taichi 实现浮点数 atomic_add 的方法
+
+```c++
+//简化的伪代码
+std::atomic<size_t> a_size = 0;
+a_size.loa
+
+class AtomicInt{
+    int cnt;
+    
+    int store(int val){
+        cnt = val;
+    }
+    
+    int load() const{
+        return cnt;
+    }
+    
+    int fetch_add(int val){
+        int old = cnt;
+        cnt += val;
+        return old;
+    }
+    
+    int exchange(int val){
+        int old = cnt;
+        cnt = val;
+        return old;
+    }
+    
+    bool compare_exchange_strong(int &old, int val){
+        if(cnt == old)
+        {
+            cnt = val;
+            return true;
+        }
+        else
+        {
+            old = cnt;
+            return false;
+        }
+    }
+}
+```
+
+# 从并发到并行
+
+- 并发：单核处理器，操作系统通过时间片调度算法，轮换着执行着不同的线程，看起来就好像是同时运行一样，其实每一时刻只有一个线程在运行。目的：异步地处理多个不同的任务，避免同步造成的阻塞
+- 并行：多核处理器，每个处理器执行一个线程，真正的同时运行。目的：将一个任务分派到多个核上，从而更快完成任务。
+
+## TBB简单介绍
+
+TBB和线程的区别：TBB最多分配跟物理核心一样多的线程(待定),一个任务不一定对应一个线程，如果任务数量超过CPU最大的线程数，会由 TBB 在用户层负责调度任务运行在多个预先分配好的线程，而不是由操作系统负责调度线程运行在多个物理核心。
+
+```cpp
+int main0() {
+    tbb::task_group tg;
+    tg.run([&] {
+        download("hello.zip");
+    }); //类似与线程
+    tg.run([&] {
+        interact();
+    });
+    tg.wait();
+    return 0;
+}
+
+int main()
+{
+    tbb::parallel_invoke([&]{
+    download("hello.zip");}, 
+    [&]{interact();}); //控制多个任务并行执行
+    return 0;
+}
+
+```
+
+## 时间复杂度和工作量复杂度
+
+并行算法的评估指标主要为：
+
+- 时间复杂度：程序所用的总时间（重点）
+
+- 工作复杂度：程序所用的计算量（次要）
+
+时间复杂度决定了快慢，工作复杂度决定了耗电量。
+
+并行算法的复杂度取决于数据量 n，还取决于线程数量 c，比如 O(n/c)。不过要注意如果线程数量超过了 CPU 核心数量，通常就无法再加速了，这就是为什么要买更多核的电脑。
+
+## 映射(map)
+
+映射任务指： **i->sin(i)**
+
+使用tbb遍历由两种方式，block_range或迭代器：
+
+- tbb::blocked_range, tbb::blocked_range2d, tbb::blocked_range3d
+- tbb::parallel_for_each(iterator.....);
+
+```cpp
+//并行映射
+#include <iostream>
+#include <tbb/parallel_for.h>
+#include <vector>
+#include <cmath>
+
+int main() {
+    size_t n = 1<<26;
+    std::vector<float> a(n);
+	
+    //封装前 将任务分给4个线程处理
+    size_t maxt = 4;
+    tbb::task_group tg;
+    for(size_t t = 0; t < maxt; ++t)
+    {
+        auto beg = t* n / maxt; // 8/4=2 每个线程计算两个任务
+        auto end = std::min(n, (t+1)*n/maxt);
+        tg.run([&, beg, end]{
+           for(size_t i = beg; i < end; ++i)
+               a[i] = std::min(i);
+        });
+    }
+    tg.wait();
+    
+    //封装后
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](tbb::blocked_range<size_t> r){
+        for(size_t i = r.begin(); i < r.end(); ++i)
+            a[i] = std::sin(i);
+    });
+    
+    //基于迭代器区间
+    tbb::parallel_for_each(a.begin(), a.end(), [&](float &f){
+       f = std::sin(f); 
+    });
+    
+    return 0;
+}
+
+```
+
+## 缩并（reduce）
+
+缩并一般指累加等操作，但先后顺序可变。
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <cmath>
+
+int main()
+{
+    for(size_t i = 0; i < n; ++i)
+        res += std::min(i);
+   return 0;
+}
+```
+
+串行缩并的时间复杂度为 O(n)，工作复杂度为 O(n)，其中 n 是元素个数
+
+### 并行缩并
+
+![](./img/HPC_13.png)
+
+并行缩并的时间复杂度为 O(n/c+c)，工作复杂度为 O(n)，其中 n 是元素个数
+
+```cpp
+#include <iostream>
+#include <tbb/task_group.h>
+#include <vector>
+#include <cmath>
+
+int main(){
+    size_t n = 1<<26;
+    float res = 0;
+    
+    size_t maxt = 4;
+    tbb::task_group tg;
+    std::vector<float> tmp_res(maxt);
+    for(size_t t = 0; t < maxt; ++t)
+    {
+        size_t beg = t* n/maxt;
+        size_t end = std::min(n, (t+1)*n/maxt);
+        tg.run([&, t, beg, end]{
+           float local_res = 0;
+           for(size_t i = beg; i < end; ++i)
+               local_res += std::sin(i);
+           tmp_res[t] = local_res;
+        });
+    }
+    tg.wait();
+    for(size_t t = 0; t<maxt; ++t)
+    {
+        res += tmp_res[t];
+    }
+    std::cout << res << std::endl;
+    return 0;
+}
+```
+
+### 改进的并行缩并(gpu)
+
+采用归并的思想，一直归并到2次
+
+![](./img/HPC_14.png)
+
+改进后的并行缩并的时间复杂度为 O(logn)，工作复杂度为 O(n)
+
+### 封装后的并行缩并(parallel_reduce)
+
+```cpp
+#include <iostream>
+#include <tbb/parallel_reduce.h>
+#include <tbb/blocked_range.h>
+#include <vector>
+#include <cmath>
+
+int main() {
+    size_t n = 1<<26;
+    float res = tbb::parallel_reduce(tbb::blocked_range<size_t>(0, n), (float)0,
+    [&] (tbb::blocked_range<size_t> r, float local_res) {
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            local_res += std::sin(i);
+        }
+        return local_res;
+    }, [] (float x, float y) {
+        return x + y;
+    });
+
+    //parallel_deterministic_reduce 保证每次运行结果一致
+    
+    std::cout << res << std::endl;
+    return 0;
+}
+```
+
+**并行缩并的好处**：串行的累加会造成运算前后操作数方差较大，而并行归并的方式方差小，精度高
+
+## 扫描（scan）
+
+扫描和缩并差不多，只不过他会把求和的中间结果存到数组里去
+
+![](./img/HPC_15.png)
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <cmath>
+
+//串行扫描
+int main() {
+    size_t n = 1<<26;
+    std::vector<float> a(n);
+    float res = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        res += std::sin(i);
+        a[i] = res;
+    }
+
+    std::cout << a[n / 2] << std::endl;
+    std::cout << res << std::endl;
+    return 0;
+}
+
+#include <iostream>
+#include <tbb/task_group.h>
+#include <vector>
+#include <cmath>
+
+//归并扫描
+int main() {
+    size_t n = 1<<26;
+    std::vector<float> a(n);
+    float res = 0;
+
+    size_t maxt = 4;
+    tbb::task_group tg1;
+    std::vector<float> tmp_res(maxt);
+    for (size_t t = 0; t < maxt; t++) {
+        size_t beg = t * n / maxt;
+        size_t end = std::min(n, (t + 1) * n / maxt);
+        tg1.run([&, t, beg, end] {
+            float local_res = 0;
+            for (size_t i = beg; i < end; i++) {
+                local_res += std::sin(i);
+            }
+            tmp_res[t] = local_res;
+        });
+    }
+    tg1.wait();
+    for (size_t t = 0; t < maxt; t++) {
+        tmp_res[t] += res;
+        res = tmp_res[t];
+    }
+    tbb::task_group tg2;
+    for (size_t t = 1; t < maxt; t++) {
+        size_t beg = t * n / maxt - 1;
+        size_t end = std::min(n, (t + 1) * n / maxt) - 1;
+        tg2.run([&, t, beg, end] {
+            float local_res = tmp_res[t];
+            for (size_t i = beg; i < end; i++) {
+                local_res += std::sin(i);
+                a[i] = local_res;
+            }
+        });
+    }
+    tg2.wait();
+
+    std::cout << a[n / 2] << std::endl;
+    std::cout << res << std::endl;
+    return 0;
+}
+
+//封装 parallel_scan
+int main() {
+    size_t n = 1<<26;
+    std::vector<float> a(n);
+    float res = tbb::parallel_scan(tbb::blocked_range<size_t>(0, n), (float)0,
+    [&] (tbb::blocked_range<size_t> r, float local_res, auto is_final) {
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            local_res += std::sin(i);
+            if (is_final) {
+                a[i] = local_res;
+            }
+        }
+        return local_res;
+    }, [] (float x, float y) {
+        return x + y;
+    });
+
+    std::cout << a[n / 2] << std::endl;
+    std::cout << res << std::endl;
+    return 0;
+}
+```
+
+## 任务域和嵌套
+
+任务域即创建一个包含多个任务的结构体，并可以指定所使用的线程
+
+`tbb::task_arena ta(4)`
+
+```cpp
+#include <iostream>
+#include <tbb/parallel_for.h>
+#include <tbb/task_arena.h>
+#include <vector>
+#include <cmath>
+
+int main()
+{
+    size_t n = 1<<26;
+    std::vector<float> a(n);
+    tbb::task_arena ta(4); //指定使用4个线程
+    ta.execute([&]{
+       tbb::parallel_for((size_t)0, (size_t)n, [&](size_t i){
+          a[i] = std::sin(i); 
+       });
+    });
+    return 0;
+}
+```
+
+### 嵌套for循环造成的死锁问题
+
+pallel_for可以嵌套循环，但有可能造成死锁问题
+
+```cpp
+int main() {
+    size_t n = 1<<13;
+    std::vector<float> a(n * n);
+
+    std::mutex mtx;
+    tbb::parallel_for((size_t)0, (size_t)n, [&] (size_t i) {
+        std::lock_guard lck(mtx);
+        tbb::parallel_for((size_t)0, (size_t)n, [&] (size_t j) {
+            a[i * n + j] = std::sin(i) * std::sin(j);
+        });
+    });
+
+    return 0;
+}
+```
+
+造成的原因：
+
+- 因为 TBB 用了工作窃取法来分配任务：当一个线程 t1 做完自己队列里全部的工作时，会从另一个工作中线程 t2 的队列里取出任务，以免 t1 闲置浪费时间。
+- 因此内部 for 循环有可能“窃取”到另一个外部 for 循环的任务，从而导致 mutex 被重复上锁。
+
+### 死锁解决方法
+
+- 用标准库的递归锁 std::recursive_mutex
+- 创建另一个任务域，这样不同域之间就不会窃取工作
+- 同一个任务域，但用 isolate 隔离，禁止其内部的工作被窃取（推荐）
+
+```cpp
+
+int main() {
+    size_t n = 1<<13;
+    std::vector<float> a(n * n);
+    std::mutex mtx;
+	
+    //创建另一个域
+    tbb::parallel_for((size_t)0, (size_t)n, [&] (size_t i) {
+        std::lock_guard lck(mtx);
+        tbb::task_arena ta;
+        ta.execute([&] {
+            tbb::parallel_for((size_t)0, (size_t)n, [&] (size_t j) {
+                a[i * n + j] = std::sin(i) * std::sin(j);
+            });
+        });
+    });
+    
+    //使用isolate隔离
+    tbb::parallel_for((size_t)0, (size_t)n, [&] (size_t i) {
+        std::lock_guard lck(mtx);
+        tbb::this_task_arena::isolate([&] {
+            tbb::parallel_for((size_t)0, (size_t)n, [&] (size_t j) {
+                a[i * n + j] = std::sin(i) * std::sin(j);
+            });
+        });
+    });
+
+    return 0;
+}
+```
+
+## 任务分配
+
+- 并行计算，通常都是 CPU 有几个核心就开几个线程
+
+- 并行的关键：如何均匀分配任务到每个线程？
+
+![](./img/HPC_16.png)
+
+将任务均匀分配到四个线程上，但由于木桶效应，导致运行速度受限与最慢的第四个线程
+
+### 解决1：线程数量超过CPU核心数量，让系统调度保证各个核心始终饱和
+
+最简单的办法：只需要让线程数量超过CPU核心数量(切成16份，16个线程执行)，这时操作系统会自动启用时间片轮换调度，轮流执行每个线程。
+
+- 思想：切得够多，方差越小
+- 缺点：线程数量太多会造成调度的 overhead。
+
+### 解决2：线程数量不变，但是用一个队列分发和认领任务
+
+![](./img/HPC_17.png)
+
+线程池的做法：我们仍是分配4个线程，但还是把图像切分为16份，作为一个“任务”推送到全局队列里去。每个线程空闲时会不断地从那个队列里取出数据，即“认领任务”。然后执行，执行完毕后才去认领下一个任务，从而即使每个任务工作量不一也能自动适应。
+
+避免了线程需要保存上下文的开销。但是需要我们管理一个任务队列，而且要是线程安全的队列。
+
+### 解决3：每个线程一个任务队列，做完本职工作后可以认领其他线程的任务
+
+![](./img/HPC_18.png)
+
+### 解决4：随机分配法（通过哈希函数或线性函数, 网格跨步循环（grid-stride loop）)
+
+我们仍是分配4个线程，但还是把图像切分为16份。
+
+把 (x,y) 那一份，分配给 (x + y * 3) % 4 号线程。这样总体来看每个线程分到的块的位置是随机的，从而由于正太分布数量越大方差越小的特点，每个线程分到的总工作量大概率是均匀的
+
+## 任务分配的实现
+
+### tbb::static_partitioner，指定区间的粒度
+
+static_partitioner默认分配和线程一样多的任务 粒度为n/线程数
+
+```cpp
+
+
+int main(){
+    size_t n = 32;
+    tbb::task_arena ta(4);
+    //创建了4个线程4个任务 每个任务包含 8 个元素
+    ta.execute([&] {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, n), // 32除4个任务=8个元素
+        [&] (tbb::blocked_range<size_t> r) {
+            mtprint("thread", tbb::this_task_arena::current_thread_index(), "size", r.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        }, tbb::static_partitioner{});
+    });
+    
+    ta.execute([&] {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, n， 16), //16代表每个任务包含的元素 32除16个元素=2个任务 4个线程调度2个线程
+        [&] (tbb::blocked_range<size_t> r) {
+            mtprint("thread", tbb::this_task_arena::current_thread_index(), "size", r.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        }, tbb::static_partitioner{});
+    });  
+}
+```
+
+### tbb::simple_partitioner
+
+simple_partitioner默认每个任务粒度为1
+
+```cpp
+int main() {
+    size_t n = 32;
+
+    TICK(for);
+    tbb::task_arena ta(4);
+    ta.execute([&] {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, n), //4个线程 每个任务粒度为1 32除1=32个任务
+        [&] (tbb::blocked_range<size_t> r) {
+            for (size_t i = r.begin(); i < r.end(); i++) {
+                mtprint("thread", tbb::this_task_arena::current_thread_index(),
+                        "size", r.size(), "begin", r.begin());
+                std::this_thread::sleep_for(std::chrono::milliseconds(i * 10));
+            }
+        }, tbb::simple_partitioner{});
+    });
+    TOCK(for);
+    
+    ta.execute([&] {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, n， 4), //指定每个任务包含4个元素
+        [&] (tbb::blocked_range<size_t> r) {
+            for (size_t i = r.begin(); i < r.end(); i++) {
+                mtprint("thread", tbb::this_task_arena::current_thread_index(),
+                        "size", r.size(), "begin", r.begin());
+                std::this_thread::sleep_for(std::chrono::milliseconds(i * 10));
+            }
+        }, tbb::simple_partitioner{});
+    });
+
+    return 0;
+}
+```
+
+> tbb::simple_partitioner 能够按照给定的粒度大小（grain）将矩阵进行分块。块内部小区域按照常规的两层循环访问以便矢量化，块外部大区域则以类似 Z 字型的曲线遍历，这样能保证每次访问的数据在地址上比较靠近，并且都是最近访问过的，从而已经在缓存里可以直接读写，避免了从主内存读写的超高延迟
+
+### tbb::auto_partitioner（默认）
+
+自动根据 lambda 中函数的执行时间判断采用何种分配方法。
+
+### 总结
+
+- tbb::static_partitioner 用于循环体均匀的情况 分得少且均匀
+- tbb::simple_partitioner 用于循环体不均匀的情况效果很好 分得更多
+
+## 并发容器
+
+std::vector不是一个线程安全的容器，其指针和迭代器可能会被改变。
+
+tbb提供tbb::concurrent_vector容器，特点如下：
+
+- 他不保证元素在内存中是连续的。换来的优点是 push_back 进去的元素，扩容时不需要移动位置，从而指针和迭代器不会失效
+-  push_back 会额外返回一个迭代器（iterator），指向刚刚插入的对象。
+-  grow_by(n) 则可以一次扩充 n 个元素。他同样是返回一个迭代器（iterator），之后可以通过迭代器的 ++ 运算符依次访问连续的 n 个元素，* 运算符访问当前指向的元素。
+- tbb::concurrent_vector 还是一个多线程安全的容器，能够被多个线程同时并发地 grow_by 或 push_back 而不出错。
+- parallel_for 也支持迭代器
+
+tbb对应stl也有其他容器，都以concurrent_开头的容器
+
+## 并行筛选(filter)
+
+筛选对容器进行遍历，选择中符合条件的值
+
+### 筛选1
+
+利用多线程安全的 concurrent_vector 动态追加数据基本没有加速>。内部可能频繁使用互斥锁导致效率不高
+
+```cpp
+int main()
+{
+    size_t n = 1<<27;
+    tbb::concurrent_vector<float> a;
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+    [&] (tbb::blocked_range<size_t> r) {
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            float val = std::sin(i);
+            if (val > 0) {
+                a.push_back(val);
+            }
+        }
+    });
+}
+```
+
+### 筛选2
+
+先推到线程局部（thread-local）的 vector最后一次性推入到 concurrent_vector可以避免频繁在 concurrent_vector 上产生锁竞争加速比：5.55 倍
+
+```cpp
+int main()
+{
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+    [&] (tbb::blocked_range<size_t> r) {
+        std::vector<float> local_a;
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            float val = std::sin(i);
+            if (val > 0) {
+                local_a.push_back(val);
+            }
+        }
+        auto it = a.grow_by(local_a.size());
+        for (size_t i = 0; i < local_a.size(); i++) {
+            *it++ = local_a[i];
+        }
+    });
+    return 0;
+}
+```
+
+### 筛选3
+
+线程局部的 vector 调用 reserve 预先分配一定内存避免 push_back 反复扩容时的分段式增长同时利用标准库的 std::copy 模板简化了代码加速比：5.94 倍
+
+```cpp
+int main()
+{
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+    [&] (tbb::blocked_range<size_t> r) {
+        std::vector<float> local_a;
+        local_a.reserve(r.size());
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            float val = std::sin(i);
+            if (val > 0) {
+                local_a.push_back(val);
+            }
+        }
+        auto it = a.grow_by(local_a.size());
+        std::copy(local_a.begin(), local_a.end(), it);
+    });
+}
+```
+
+### 筛选4
+
+采用std::vector作为数据结构,先对 a 预留一定的内存，避免频繁扩容影响性能。加速比：5.98 倍
+
+```cpp
+int main()
+{
+    size_t n = 1<<27;
+    std::vector<float> a;
+    std::mutex mtx;
+    
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+    [&] (tbb::blocked_range<size_t> r) {
+        std::vector<float> local_a;
+        local_a.reserve(r.size());
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            float val = std::sin(i);
+            if (val > 0) {
+                local_a.push_back(val);
+            }
+        }
+        std::lock_guard lck(mtx);
+        std::copy(local_a.begin(), local_a.end(), std::back_inserter(a));
+    });
+}
+```
+
+### 筛选5 最快
+
+彻底避免了互斥量，完全通过预先准备好的大小，配合 atomic 递增索引批量写入。同时用小彭老师拍脑袋想到的 pod 模板类，使得 vector 的 resize 不会零初始化其中的值。加速比：6.26 倍
+
+```cpp
+int main() {
+    size_t n = 1<<27;
+    std::vector<pod<float>> a;
+    std::atomic<size_t> a_size = 0;
+
+    TICK(filter);
+    a.resize(n);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+    [&] (tbb::blocked_range<size_t> r) {
+        std::vector<pod<float>> local_a(r.size());
+        size_t lasize = 0;
+        for (size_t i = r.begin(); i < r.end(); i++) {
+            float val = std::sin(i);
+            if (val > 0) {
+                local_a[lasize++] = val;
+            }
+        }
+        size_t base = a_size.fetch_add(lasize);
+        for (size_t i = 0; i < lasize; i++) {
+            a[base + i] = local_a[i];
+        }
+    });
+    a.resize(a_size);
+    TOCK(filter);
+
+    return 0;
+}
+```
+
+### 筛选6 gpu
+
+![](./img/HPC_19.png)
+
+## 分治和排序
+
+分治：将一个任务分成多个任务来执行，使用parallel_invoke来执行
+
+优化：任务划分得够细时，转为串行，缓解调度负担（scheduling overhead）
+
+```cpp
+//斐波那契数列的优化
+//tbb::parallel_invoke
+int fib(int n)
+{
+    if(n < 2)
+        return n;
+    int a, b;
+    tbb::parallel_invoke([&]{
+        a = fib(n-1);
+    }, [&]{
+        b = fib(n-2);
+    });
+    return a + b;
+}
+
+int fib(int n)
+{
+    if(n < 2)
+        return serial_fib(n); //串行执行
+    int a, b;
+    tbb::parallel_invoke([&]{
+        a = fib(n-1);
+    }, [&]{
+        b = fib(n-2);
+    });
+    return a + b;
+}
+```
+
+### 排序
+
+递归函数可以使用并行来加速。同样数据足够小时，开始用标准库串行的排序
+
+封装：tbb::parallel_sort
+
+```cpp
+int main()
+{
+    size_t n = 1<<24;
+    std::generate(arr.begin(), arr.end(),std::rand);
+    tbb::parallel_sort(arr.begin(), arr.end(), std::less<int>{});
+    return 0;
+}
+```
+
+## 流水线并行
+
+![](./img/HPC_20.png)
+
+![](./img/HPC_21.png)
+
+流水线并行参数：
+
+- serial_in_order 表示当前步骤只允许串行执行，且执行的顺序必须一致。
+
+- serial_out_of_order 表示只允许串行执行，但是顺序可以打乱。
+
+- parallel 表示可以并行执行当前步骤，且顺序可以打乱。
+
+- 每一个步骤（filter）的输入和返回类型都可以不一样。要求：流水线上一步的返回类型，必须和下一步的输入类型一致。且第一步的没有输入，最后一步没有返回，所以都为 void。
+
+- TBB 支持嵌套的并行，因此流水线内部也可以调用 tbb::parallel_for 进一步并行。
+- 流水线式的并行，因为每个线程执行的指令之间往往没有关系，主要适用于各个核心可以独立工作的 CPU，GPU 上则有 stream 作为替代
+
+```cpp
+int main() {
+    size_t n = 1<<11;
+
+    std::vector<Data> dats(n);
+    std::vector<float> result;
+
+    TICK(process);
+    auto it = dats.begin();
+    tbb::parallel_pipeline(8
+    , tbb::make_filter<void, Data *>(tbb::filter_mode::serial_in_order,
+    [&] (tbb::flow_control &fc) -> Data * {
+        if (it == dats.end()) {
+            fc.stop();
+            return nullptr;
+        }
+        return &*it++;
+    })
+    , tbb::make_filter<Data *, Data *>(tbb::filter_mode::parallel,
+    [&] (Data *dat) -> Data * {
+        dat->step1();
+        return dat;
+    })
+    , tbb::make_filter<Data *, Data *>(tbb::filter_mode::parallel,
+    [&] (Data *dat) -> Data * {
+        dat->step2();
+        return dat;
+    })
+    , tbb::make_filter<Data *, Data *>(tbb::filter_mode::parallel,
+    [&] (Data *dat) -> Data * {
+        dat->step3();
+        return dat;
+    })
+    , tbb::make_filter<Data *, float>(tbb::filter_mode::parallel,
+    [&] (Data *dat) -> float {
+        float sum = std::reduce(dat->arr.begin(), dat->arr.end());
+        return sum;
+    })
+    , tbb::make_filter<float, void>(tbb::filter_mode::serial_out_of_order,
+    [&] (float sum) -> void {
+        result.push_back(sum);
+    })
+    );
+    TOCK(process);
+
+    return 0;
+}
+```
+
+
+
+
+
+# 性能测试
+
+### tbb提供的测试时间方法
+
+```cpp
+#include <tbb/tick_count.h>
+#define TICK(x) auto bench__##x = tbb::tick_count::now();
+#define TOCK(x) std::cout << #x " :" << (tbb::tick_count::now() - bench_##x).seconds() << "s" << std::endl;
+```
+
+### 评价指标
+
+- 公式：加速比=串行用时÷并行用时
+-  reduce 是内存密集型，for(sin) 是计算密集型
+
+### googl benchmark
+
+只需将你要测试的代码放在他的for (auto _: bm)里面即可。他会自动决定要重复多少次，保证结果是准确的，同时不浪费太多时间
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <benchmark/benchmark.h>
+
+constexpr size_t n = 1<<27;
+std::vector<float> a(n);
+
+void BM_for(benchmark::State &bm) {
+    for (auto _: bm) {
+        // fill a with sin(i)
+        for (size_t i = 0; i < a.size(); i++) {
+            a[i] = std::sin(i);
+        }
+    }
+}
+BENCHMARK(BM_for);
+
+void BM_reduce(benchmark::State &bm) {
+    for (auto _: bm) {
+        // calculate sum of a
+        float res = 0;
+        for (size_t i = 0; i < a.size(); i++) {
+            res += a[i];
+        }
+        benchmark::DoNotOptimize(res);
+    }
+}
+BENCHMARK(BM_reduce);
+
+BENCHMARK_MAIN();
+
+```
+
+# 访存优化
+
+## 基本原理介绍
+
+影响算法运行的有内存瓶颈和计算瓶颈。内存访问速度是远低于计算速度：
+
+- 1次读写约等于8次加法，1次除法约等于2次加法
+
+```cpp
+int main()
+{
+    for(int i = 0; i < 64; ++i)
+        a[i] = 1; // a[i] = func(i);
+}
+
+//上述代码计算非常简单，导致cpu大部分时间浪费在等内存延迟。
+```
+
+## 内存带宽
+
+- 要想利用全部cpu核心，避免mem-bound，需要func里有足够的计算量。
+- 当核心数量越多，CPU计算能力越强，相对之下来不及从内存读写数据，从而越容易mem-bound。
+- 使用dmidecode查看内存信息 理论极限带宽=频率×宽度×数量
+
+## 缓存和局域性
+
+针对不同量度的数据量测试，可以发现在不同数据量下其带宽也不同
+
+**lscpu #查看高速缓存大小**
+
+```cpp
+for(int i = 0; i < n; ++i)
+    a[i] = 1;
+//n为datasize
+```
+
+![](./img/HPC_22.png)
+
+这是因为cpu内部有一片很小的存储器--缓存(cache):
+
+- 当CPU访问某个地址时，会先查找缓存中是否有对应的数据。如果没有，则从内存中读取，并存储到缓存中；如果有，则直接使用缓存中的数据
+- 读写时也都会通过cache来进行数据传输
+
+![](./img/HPC_23.png)
+
+### 缓存的工作机制 读
+
+当CPU读取一个地址时：
+
+- 缓存会查找和该地址匹配的条目。如果找到，则给CPU返回缓存中的数据。如果找不到，则向主内存发送请求，等读取到该地址的数据，就创建一个新条目。
+- 在 x86 架构中每个条目的存储 64 字节的数据，这个条目又称之为**缓存行（cacheline）**。
+- **当访问 0x0048~0x0050 这 4 个字节时，实际会导致 0x0040~0x0080 的 64 字节数据整个被读取到缓存中**
+- 这就是为什么我们喜欢把数据结构的起始地址和大小对齐到 64 字节，为的是不要浪费缓存行的存储空间。
+
+### 缓存的工作机制 写
+
+当CPU写入一个地址时：
+
+- 缓存会查找和该地址匹配的条目。如果找到，则修改缓存中该地址的数据。如果找不到，则创建一个新条目来存储CPU写的数据，并标记为脏（dirty，缓存中改了内存没改）
+- 当读和写创建的新条目过多，缓存快要塞不下时，他会把最不常用的那个条目移除，这个现象称为失效（invalid）。如果那个条目是被标记为脏的，则说明是当时打算写入的数据，那就需要向主内存发送写入请求，等他写入成功，才能安全移除这个条目。
+- 如有多级缓存，则一级缓存失效后会丢给二级缓存。再依次丢给内存
+
+### 缓存行决定数据的粒度
+
+```cpp
+int main()
+{
+    for(size_t i = 0; i < n; i += 1 )
+    {
+        a[i] = 1;
+    }
+    
+    for(size_t i = 0; i < n; i += 2 )
+    {
+        a[i] = 1;
+    }
+    
+    for(size_t i = 0; i < n; i += 4 )
+    {
+        a[i] = 1;
+    }
+    
+    //上述小于64子节的跨步访问，其时间效率类似
+}
+```
+
+**访问内存的用时，和访问的字节数量无关，和访问的每个字节所在的缓存行数量有关。**
+
+**可见，能否很好的利用缓存，和程序访问内存的空间局域性有关。**
+
+### 内存布局AOS和SOA
+
+![](./img/HPC_24.png)
+
+## 预取和直写
+
+缓存行预取技术：当程序顺序访问 a[0], a[1] 时，CPU会智能地预测到你接下来可能会读取 a[2]，于是会提前给缓存发送一个读取指令，让他读取 a[2]、a[3]。缓存在后台默默读取数据的同时，CPU自己在继续处理 a[0] 的数据。这样等 a[0], a[1] 处理完以后，缓存也刚好读取完 a[2] 了，从而CPU不用等待，就可以直接开始处理 a[2]，避免等待数据的时候CPU空转浪费时间。**如果你的访存是随机的，那就没办法预测。**
+
+> 64子节的随机访问比顺序访问慢的原因：
+>
+> 是因为顺序访问会提前预取，所以可以采用4096子节(页)的随机访问
+
+### 页对齐的重要性
+
+- 为什么要 4KB？原来现在操作系统管理内存是用分页（page），程序的内存是一页一页贴在地址空间中的，有些地方可能不可访问，或者还没有分配，则把这个页设为不可用状态，访问他就会出错，进入内核模式
+- 因此硬件出于安全，预取不能跨越页边界，否则可能会触发不必要的 page fault。
+- _mm_alloc 申请起始地址对齐到页边界的一段内存，真正做到每个块内部不出现跨页现象。
+
+```cpp
+void BM_random_4kb_aligned(benchmark::State& bm)
+{
+    float* a = (float*)_mm_alloc(n*sizeof(float), 4096);
+    memset(a, 0, n*sizeof(float));
+    for(auto _: bm)
+    {
+#pragma omp parallel for
+        for(size_t i = 0; i < n/1024; ++i)
+        {
+         	size_t r = randomize(i) % (n/1024);
+            for(size_t j = 0; j < 1024; j++)
+                benchmark::DoNotOptimize(a[r*1024+j]);
+        }
+        benchmark::DoNotOptimize(a);
+    }
+    _mm_free(a);
+}
+```
+
+### 手动预取（_mm_prefetch）
+
+- 对于不得不随机访问很小一块的情况，还可以通过 _mm_prefetch 指令手动预取一个缓存行。
+- 这里第一个参数是要预取的地址（最好对齐到缓存行），第二个参数 _MM_HINT_T0 代表预取数据到一级缓存，_MM_HINT_T1 代表只取到二级缓存，_MM_HINT_T2 代表三级缓存；_MM_HINT_NTA 则是预取到非临时缓冲结构中，可以最小化对缓存的污染，但是必须很快被用上。
+
+```cpp
+void BM_random_64B_prefetch(benchmark::State& bm)
+{
+    for(auto _: bm)
+    {
+#pragma omp parallel for
+        for(size_t i = 0; i < n/16; ++i)
+        {
+            size_t next_r = randomize(i+64)%(n/16);
+            _mm_prefetch(&a[next_r * 16], _MM_HINT_T0);
+            size_t r = randomize(i) % (n/16);
+            for(size_t j = 0; j < 16; j++)
+                benchmark::DoNotOptimize(a[r*16+j]);
+        }
+    }
+    benchmark::DoNotOptimize(a);
+}
+```
+
+### 延迟隐藏
+
+> 1次读写+0次加法”应该会比“1次读写+8次加法”快一点点吧，因为8次加法尽管比1次读写快很多，但是毕竟还是有时间的啊，为什么会几乎没有任何区别？
+
+这都是得益于CPU的预取机制，他能够在等待a[i+1]的内存数据抵达时，默默地做着a[i]的计算，从而只要计算的延迟小于内存的延迟，延迟就被隐藏起来了，而不必等内存抵达了再算。
+
+![](./img/HPC_25.png)
+
+上图为延迟隐藏
+
+![](./img/HPC_26.png)
+
+### 为什么写入比读取慢
+
+注意到一个现象：写入花的时间似乎是读取的2倍？
+
+> 原因：写入的粒度太小造成不必要的读取
+
+- 这是因为缓存和内存通信的最小单位是缓存行：64字节。
+
+- 当CPU试图写入4字节时，因为剩下的60字节没有改变，缓存不知道CPU接下来会不会用到那60字节，因此他只好从内存读取完整的64字节，修改其中的4字节为CPU给的数据，之后再择机写回。
+
+- 这就导致了虽然没有用到读取数据，但实际上缓存还是从内存读取了，从而浪费了2倍带宽
+
+![](./img/HPC_27.png)
+
+### 绕过缓存，直接写入：_mm_stream_si32
+
+可以用 _mm_stream_si32 指令代替直接赋值的写入，他能够绕开缓存，将一个4字节的写入操作，挂起到临时队列，等凑满64字节后，直接写入内存，从而完全避免读的带宽。
+
+stream的特点：
+
+- 因为 _mm_stream_si32 会绕开缓存，直接把数据写到内存，之后读取的话，反而需要等待 stream 写回执行完成，然后重新读取到缓存，反而更低效。
+- 适用于： 该数组只有写入，之前完全没有读取过。之后没有再读取该数组的地方。
+
+### 4倍矢量化的版本：_mm_stream_ps
+
+- _mm_stream_si32 可以一次性写入4字节到挂起队列。而 _mm_stream_ps 可以一次性写入 16 字节到挂起队列，更加高效了
+
+- 不过，_mm_stream_ps 写入的地址必须对齐到 16 字节，否则会产生段错误等异常
+- 需要注意，stream 系列指令写入的地址，必须是连续的，中间不能有跨步，否则无法合并写入，会产生有中间数据读的带宽
+
+### intel关于_MM系列
+
+https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html
+
+## 循环合并法
+
+
+
+# 模型INT8量化
+
+## 量化介绍
+
+- **量化就是将我们训练好的模型，不论是权重、还是计算op，都转换为低精度去计算**。因为FP16的量化很简单，所以实际中我们谈论的量化更多的是**INT8的量化**
+
+- FP32->FP16几乎是无损的(CUDA中使用`__float2half`直接进行转换)
+- 量化就是将浮点型实数量化为整型数（FP32->INT8）
+- 反量化就是将整型数转换为浮点型实数（INT8->FP32）
+
+### 量化分类
+
+- PTQ（Post-Training Static Quantization）训练后静态量化：模型训练完成后量化
+- QAT(Quantization Aware Training) 量化训练：边量化边训练
+- 线性量化和非线性量化，常为线性量化
+- 对称量化和非对称量化，区间对称否
+
+### 线性量化的对称量化
+
+![](./img/HPC_8.png)
+
+## 卷积量化
+
+一般量化过程中，有`pre-tensor`和`pre-channel`两种方式，`pre-tensor`显而易见，就是对于同一块输入（比如某个卷积前的输入tensor）我们采用一个scale，该层所有的输入数据共享一个scale值；而`pre-channel`呢一般是作用于权重，比如一个卷积的权重维度是[64,3,3,3]（输入通道为3输出通道为64，卷积核为3x3），`pre-channel`就是会产生64个scale值，分别作用于该卷积权重参数的64个通道。
+
+参考：![https://zhuanlan.zhihu.com/p/405571578]
+
+![](./img/HPC_9.png)
+
+![](./img/HPC_10.png)
+
+当把k去除将s取出来之后，我们发现sxi和swj分别代表输入的第i行的scale和权重的第j列的scale值，这样输入的每一行必须共享scale，而权重的每一列也必须共享scale
+
+![](./img/HPC_11.png)
+
+## ncnn量化
+
+![](./img/HPC_12.png)
+
+NCNN首先将输入(bottom_blob)和权重(weight_blob)量化成INT8，在INT8下计算卷积，然后反量化到fp32，再和未量化的bias相加，得到输出(top_blob)
+
+采用非对称量化的方式，通过KL散度(相对熵)来衡量量化前和量化后的相似度，最后计算迭代得到最好的scale(127/T)
+
+注意：scale也是按照pre-tensor的方式进行，每一行共享一个scale
+
+```cpp
+//量化核心代码
+for (int i=0; i<size; i++)
+{
+ outptr[i] = float2int8(ptr[i] * scale);
+}
+
+static inline signed char float2int8(float v)
+{
+ int int32 = round(v);
+ if (int32 > 127) return 127;
+ if (int32 < -128) return -128;
+ return (signed char)int32;
+}
+```
+
+
+
+# CPU特性优化
+
+## cpu cache
+
+关于cpu cache：
+
+- cpu的cache在cpu中是一种高速缓存寄存器。有三级(L1, L2, L3)依次速度降低。L1一般有64KB
+- cache的写入策略：
+    - 直写模式：数据更新时，同时写入内存和cache
+    - 回写模式：数据更新时，只写入到cache中，数据弹出cache时，才写入到内存中
+- 多个cpu对某块内存同时读写，会引起冲突问题，这被称为cache一致性问题
+
+## if-else
+
+- 流水线架构可以很好地压榨多个资源并行运行。
+
+- 在if判断的分支预测中，如果失败需要清空流水线中的那些预测出来的指令，重新加载正确的指令到流水线中执行，效率很低。
+- 减少分支的方法：位操作和表结构
+
+```c++
+for(int i = 0; i < 1000; ++i)
+{
+    for(int c = 0; c < ARRAY_SIZE; ++c)
+    {
+        if(data[c] >= 128)
+            sum += data[c];
+    }
+}
+
+//位操作
+int t = (data[c] - 128)>>31;
+sum += ~t & data[c];
+
+//表结构
+//在循环前计算 牺牲空间
+int lookup[DATA_SIZE];
+for(int c = 0; c < DATA_SIZE; ++c)
+{
+    lookup[c] = (c >= 128)?c
+}
+```
+
+# openmp和avx
+
+## openmp
+
+OpenMP 是一套 C++ 并行编程框架
+
+gcc编译时加入 `-fopenmp`
+
+### 并行前提
+
+- 可拆分：代码和变量的前后不能相互依赖
+- 独立运行：运行时，需拥有一定独有的资源
+
+### 实例练习
+
+```cpp
+#include <omp.h>
+int main()
+{
+    #pragma omp parallel for num_threads(4)
+    for(int i = 0; i < 10; ++i)
+    {
+		std::cout << i << endl;
+    }
+    return 0;
+}
+```
+
+在访问非独立资源时
+
+reduction原句：reduction子句可以对一个或者多个参数指定一个操作符，然后每一个线程都会创建这个参数的私有拷贝，在并行区域结束后，迭代运行指定的运算符，并更新原参数的值。
+
+```cpp
+int sum = 0;
+#pragma omp parallel for num_threads(32)
+for(int i=0; i<100; i++)
+{
+    sum +=  i; 
+}
+// sum 可能不等于4950
+// sum+=i 多个线程同时写时，可能会发生写冲突
+
+// 加入reduce原语来实现
+int sum = 0;
+#pragma omp parallel for num_threads(32) reduction(+:sum)
+for(int i=0; i<100; i++)
+{
+    sum +=  i; 
+}
+```
+
+## avx
+
+ AVX就是Intel提供的支持向量并行计算的C语言的一个库，是实现SIMD的一种方式。AMD也支持AVX。
+
+用gcc编译的指令如下：
+
+```cpp
+gcc filename.c -mavx -mavx2 -mfma -msse -msse2 -msse3
+```
+
+### AVX入门
+
+```cpp
+//案例
+#include <immintrin.h> //AVX
+#include <stdio.h>
+#include <sys/time.h>
+#include <stdlib.h>
+#include <time.h>
+#define __VEC_LENGTH__ 10000000
+
+double arr1[__VEC_LENGTH__];
+double arr2[__VEC_LENGTH__];
+double result[__VEC_LENGTH__];
+__m256d vecarr1[__VEC_LENGTH__ / 4];
+__m256d vecarr2[__VEC_LENGTH__ / 4];
+__m256d temp[__VEC_LENGTH__ / 4];
+
+//使用AVX计算10^7维向量加法，并返回i计算时间
+long sum_avx(double *arr1, double *arr2, double *result);
+//使用for循环计算向量加法，并返回计算时间
+long sum_arr(double *arr1, double *arr2, double *result);
+
+int main()
+{
+    srand(time(NULL));
+    for(int i = 0; i < __VEC_LENGTH__; ++i)
+    {
+        arr1[i] = rand() / 1000;
+        arr2[i] = rand() / 1000;
+    }
+
+    clock_t time1 = sum_avx(arr1, arr2, result);
+    printf("Using avx takes %ld us\n",time1);
+    clock_t time2 = sum_arr(arr1, arr2, result);
+    printf("Using for loop takes %ld us\n", time2);
+
+    return 0;
+}
+
+long sum_avx(double *arr1, double *arr2, double *result)
+{
+    //数据转换为AVX向量
+    for(int i = 0; i < __VEC_LENGTH__; i += 4)
+    {
+        vecarr1[i / 4] = _mm256_setr_pd(arr1[i], arr1[i + 1], arr1[i + 2], arr1[i + 3]);
+        vecarr2[i / 4] = _mm256_setr_pd(arr2[i], arr2[i + 1], arr2[i + 2], arr2[i + 3]);
+    }
+	
+    //测试的时间仅包括AVX向量加法的时间
+    struct timeval tv1, tv2;
+    gettimeofday(&tv1, NULL);
+    for(int i = 0; i < __VEC_LENGTH__ / 4; ++i)
+    {
+        temp[i] = _mm256_add_pd(vecarr1[i], vecarr2[i]); //计算
+    }
+    gettimeofday(&tv2, NULL);
+	
+    //数据转换为结果
+    for(int i = 0; i < __VEC_LENGTH__ / 4; ++i)
+    {
+        result[i * 4] = temp[i][0];
+        result[i * 4 + 1] = temp[i][1];
+        result[i * 4 + 2] = temp[i][2];
+        result[i * 4 + 3] = temp[i][3];
+    }
+
+    return (tv2.tv_sec - tv1.tv_sec) * 1000000 + tv2.tv_usec - tv1.tv_usec;
+}
+
+long sum_arr(double *arr1, double *arr2, double *result)
+{
+    struct timeval tv1, tv2;
+    gettimeofday(&tv1, NULL);
+    for(int i = 0; i < __VEC_LENGTH__; ++i)
+    {
+        result[i] = arr1[i] + arr2[i];
+    }
+    gettimeofday(&tv2, NULL);
+    return (tv2.tv_sec - tv1.tv_sec) * 1000000 + tv2.tv_usec - tv1.tv_usec;
+}
+```
+
+### AVX编程基础
+
+**数据类型**
+
+| 数据类型 | 描述                        |
+| -------- | --------------------------- |
+| __m128   | 包含4个float类型数字的向量  |
+| __m128d  | 包含2个double类型数字的向量 |
+| __m128i  | 包含若干个整型数字的向量    |
+| __m256   | 包含8个float类型数字的向量  |
+| __m256d  | 包含4个double类型数字的向量 |
+| __m256i  | 包含若干个整型数字的向量    |
+
+**函数命名**
+
+```
+_mm<bit_width>_<name>_<data_type>
+```
+
+- `<bit_width>` 表明了向量的位长度，对于128位的向量，这个参数为空，对于256位的向量，这个参数为256。
+- `<name>`描述了内联函数的算术操作。
+- `<data_type>` 标识函数主参数的数据类型。
+
+```c++
+//data_type
+ps 包含float类型的向量
+pd 包含double类型的向量
+epi8/epi16/epi32/epi64 包含8位/16位/32位/64位的有符号整数
+epu8/epu16/epu32/epu64 包含8位/16位/32位/64位的无符号整数
+si128/si256 未指定的128位或者256位向量
+m128/m128i/m128d/m256/m256i/m256d 当输入向量类型与返回向量的类型不同时，标识输入向量类型
+```
+
+**相关运算**
+
+| 数据类型                                      | 描述                                                |
+| --------------------------------------------- | --------------------------------------------------- |
+| _mm256_add_ps/pd                              | 对两个浮点向量做加法                                |
+| _mm256_sub_ps/pd                              | 对两个浮点向量做减法                                |
+| (2)_mm256_add_epi8/16/32/64                   | 对两个整形向量做加法                                |
+| (2)_mm256_sub_epi8/16/32/64                   | 对两个整形向量做减法                                |
+| (2)_mm256_adds_epi8/16 (2)_mm256_adds_epu8/16 | 两个整数向量相加且考虑内存饱和问题                  |
+| (2)_mm256_subs_epi8/16 (2)_mm256_subs_epu8/16 | 两个整数向量相减且考虑内存饱和问题                  |
+| _mm256_hadd_ps/pd                             | 水平方向上对两个float类型向量做加法                 |
+| _mm256_hsub_ps/pd                             | 垂直方向上最两个float类型向量做减法                 |
+| (2)_mm256_hadd_epi16/32                       | 水平方向上对两个整形向量做加法                      |
+| (2)_mm256_hsub_epi16/32                       | 水平方向上最两个整形向量做减法                      |
+| (2)_mm256_hadds_epi16                         | 对两个包含short类型的向量做加法且考虑内存饱和的问题 |
+| (2)_mm256_hsubs_epi16                         | 对两个包含short类型的向量做减法且考虑内存饱和的问题 |
+| _mm256_addsub_ps/pd                           | 加上和减去两个float类型的向量                       |
+| _mm256_mul_ps/pd                              | 对两个float类型的向量进行相乘                       |
+| (2)_mm256_mul_epi32 (2)_mm256_mul_epu32       | 将包含32位整数的向量的最低四个元素相乘              |
+| (2)_mm256_mullo_epi16/32                      | Multiply integers and store low halves              |
+| (2)_mm256_mulhi_epi16 (2)_mm256_mulhi_epu16   | Multiply integers and store high halves             |
+| (2)_mm256_mulhrs_epi16                        | Multiply 16-bit elements to form 32-bit elements    |
+| _mm256_div_ps/pd                              | 对两个float类型的向量进行想除                       |
+
+**数据转换到AVX向量**
+
+| 数据类型                            | 描述                                        |
+| ----------------------------------- | ------------------------------------------- |
+| _mm256_setzero_ps/pd                | 返回一个全0的float类型的向量                |
+| _mm256_setzero_si256                | 返回一个全0的整形向量                       |
+| _mm256_set1_ps/pd                   | 用一个float类型的数填充向量                 |
+| _mm256_set1_epi8/epi16/epi32/epi64x | 用整形数填充向量                            |
+| _mm256_set_ps/pd                    | 用8个float或者4个double类型数字初始化向量   |
+| _mm256_set_epi8/epi16/epi32/epi64x  | 用一个整形数初始化向量                      |
+| _mm256_set_m128/m128d/m128i         | 用2个128位的向量初始化一个256位向量         |
+| _mm256_setr_ps/pd                   | 用8个float或者4个double的转置顺序初始化向量 |
+| _mm256_setr_epi8/epi16/epi32/epi64x | 用若干个整形数的转置顺序初始化向量          |
+
+**从内存读取数据到寄存器**
+
+| 数据类型                    | 描述                            |
+| --------------------------- | ------------------------------- |
+| _mm256_load_ps/pd           | 从对齐的内存地址加载浮点向量    |
+| _mm256_load_si256           | 从对齐的内存地址加载整形向量    |
+| _mm256_loadu_ps/pd          | 从未对齐的内存地址加载浮点向量  |
+| _mm256_loadu_si256          | 从未对齐的内存地址加载整形向量  |
+| _mm_maskload_ps/pd          | 根据掩码加载128位浮点向量的部分 |
+| _mm256_maskload_ps/pd       | 根据掩码加载256位浮点向量的部分 |
+| (2)_mm_maskload_epi32/64    | 根据掩码加载128位整形向量的部分 |
+| (2)_mm256_maskload_epi32/64 | 根据掩码加载256位整形向量的部分 |
+
+(2)代表只在AVX2中支持
+
+**将寄存器的数据读取到内存中**
+
+```c++
+void _mm_store_ss (float *p, __m128 a)    
+void _mm_store_ps (float *p, __m128 a)    
+void _mm_store1_ps (float *p, __m128 a)    
+void _mm_storeh_pi (__m64 *p, __m128 a)    
+void _mm_storel_pi (__m64 *p, __m128 a)    
+void _mm_storer_ps (float *p, __m128 a)    
+void _mm_storeu_ps (float *p, __m128 a)    
+void _mm_stream_ps (float *p, __m128 a)  
+```
+
+| 数据类型      | 描述                           |
+| ------------- | ------------------------------ |
+| _mm_store_ss  | 一条指令                       |
+| _mm_store_ps  | 一条指令                       |
+| _mm_store1_ps | 多条指令                       |
+| _mm_storeh_pi | 只保存其高位                   |
+| _mm_storel_pi | 只保存其低位                   |
+| _mm_storer_ps | 反向，多条指令                 |
+| _mm_storeu_ps | 一条指令 不要求16子节对齐 常用 |
+| _mm_stream_ps | 直接写入内存 不改写cache的数据 |
