@@ -31,6 +31,7 @@ cmake --build . --config Release --target install -j6
 mkdir build
 cd ./build
 cmake  -G "Visual Studio 16 2019" ..
+-G "MinGW Makefiles" //使用g
 cmake --build . -j6
 cmake --build . --target install -j6
 //install用于指定在安装时运行的规则。它可以用来安装很多内容，可以包括目标二进制、动态库、静态库以及文件、目录、脚本等：

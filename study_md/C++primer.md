@@ -7180,6 +7180,7 @@ return会调用析构函数 exit不会调用局部对象的析构函数
 ## mem函数系列
 
 ```c++
+#include <>
 memcpy(void *str1, const void *str2, size_t n); //拷贝
 memmove(void *str1, const void *str2, size_t n); //移动
 memset(void* str, char c, size_t n);	//设置str所有子节为c

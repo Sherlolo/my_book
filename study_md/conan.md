@@ -39,7 +39,7 @@ Conan也可以与任何构建系统一起使用。与最流行的集成有内置
 ## 二、conan全平台安装
 无论是在什么平台，因为conan是python开发的。都可以使用python的包管理工具pip下载
 ```python
-pip install conan==1.43.0
+pip install conan==1.43.0 #1.60.0
 ```
 
 安装后：
@@ -124,22 +124,25 @@ conan --version
 首先我们创建一个文件夹，里面放上我们刚刚写的依赖于库文件的.cpp文件，命名为;`md5.cpp `,然后在创建一个名为build的文件夹，一会用来构建工程。现在我们的目录结构是这样的：
 ![在这里插入图片描述](https://img-blog.csdnimg.cn/20210404151144237.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3NleHlsdW5h,size_16,color_FFFFFF,t_70)
 
+**conan profie**
 
+一般在/root/.conan/profiles/detects路径下
 
-
+```bash
+conan profile new default --detect #创建新的profile
+```
 
 在正式开始下载库文件并编译的前，我们先告诉conan使用c++11的标准来编译我们需要的库文件。
 执行下面指令：
 
 ```shell
 conan profile update settings.compiler.libcxx=libstdc++11 default
-
 ```
 
 现在开始使用conan编译我们的库文件，首先进入build文件夹然后执行指令：
 
 ```shell
-conan install ..  --build missing
+conan install ..  --build missing #--build=poco/1.9.4 指定库重写编译
 ```
 如果你是初次安装就会看到下面这张截图：
 ![在这里插入图片描述](https://img-blog.csdnimg.cn/20210404150631790.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3NleHlsdW5h,size_16,color_FFFFFF,t_70)
@@ -161,7 +164,7 @@ Conan安装了我们的Poco依赖关系，还安装了传递依赖关系：OpenS
  add_definitions("-std=c++11")
 
  include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
- conan_basic_setup()
+ conan_basic_setup() #这一步必须再add_executable前面
 
  add_executable(md5 md5.cpp)
  target_link_libraries(md5 ${CONAN_LIBS})

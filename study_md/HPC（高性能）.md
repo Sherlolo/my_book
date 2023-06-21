@@ -1553,6 +1553,8 @@ class AtomicInt{
 - 并发：单核处理器，操作系统通过时间片调度算法，轮换着执行着不同的线程，看起来就好像是同时运行一样，其实每一时刻只有一个线程在运行。目的：异步地处理多个不同的任务，避免同步造成的阻塞
 - 并行：多核处理器，每个处理器执行一个线程，真正的同时运行。目的：将一个任务分派到多个核上，从而更快完成任务。
 
+**注意： 并行的效率会受到数据量、核心数目、内存边界的影响，可能造成并行后的效率并不高**
+
 ## TBB简单介绍
 
 TBB和线程的区别：TBB最多分配跟物理核心一样多的线程(待定),一个任务不一定对应一个线程，如果任务数量超过CPU最大的线程数，会由 TBB 在用户层负责调度任务运行在多个预先分配好的线程，而不是由操作系统负责调度线程运行在多个物理核心。
@@ -2478,7 +2480,7 @@ int main()
 ### 页对齐的重要性
 
 - 为什么要 4KB？原来现在操作系统管理内存是用分页（page），程序的内存是一页一页贴在地址空间中的，有些地方可能不可访问，或者还没有分配，则把这个页设为不可用状态，访问他就会出错，进入内核模式
-- 因此硬件出于安全，预取不能跨越页边界，否则可能会触发不必要的 page fault。
+- 因此硬件出于安全，**预取不能跨越页边界**，否则可能会触发不必要的 page fault。
 - _mm_alloc 申请起始地址对齐到页边界的一段内存，真正做到每个块内部不出现跨页现象。
 
 ```cpp
@@ -2553,7 +2555,13 @@ void BM_random_64B_prefetch(benchmark::State& bm)
 
 ### 绕过缓存，直接写入：_mm_stream_si32
 
-可以用 _mm_stream_si32 指令代替直接赋值的写入，他能够绕开缓存，将一个4字节的写入操作，挂起到临时队列，等凑满64字节后，直接写入内存，从而完全避免读的带宽。
+```cpp
+void _mm_stream_si32(int* mem_addr, int a);
+```
+
+
+
+可以用 _mm_stream_si32 指令代替直接赋值的写入，他能够绕开缓存（缓存行），将一个4字节的写入操作，挂起到临时队列，等凑满**64字节**后，直接写入内存，从而完全避免读的带宽。
 
 stream的特点：
 
@@ -2562,9 +2570,13 @@ stream的特点：
 
 ### 4倍矢量化的版本：_mm_stream_ps
 
+```cpp
+void _mm_stream_ps(float* mem_addr, __m128 a);
+```
+
 - _mm_stream_si32 可以一次性写入4字节到挂起队列。而 _mm_stream_ps 可以一次性写入 16 字节到挂起队列，更加高效了
 
-- 不过，_mm_stream_ps 写入的地址必须对齐到 16 字节，否则会产生段错误等异常
+- 不过，_mm_stream_ps 写入的地址**必须对齐到 16 字节**，否则会产生段错误等异常
 - 需要注意，stream 系列指令写入的地址，必须是连续的，中间不能有跨步，否则无法合并写入，会产生有中间数据读的带宽
 
 ### intel关于_MM系列
@@ -2572,6 +2584,552 @@ stream的特点：
 https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html
 
 ## 循环合并法
+
+### 两个循环体的合并
+
+```cpp
+for(size_t i = 0; i < n; ++i)
+    a[i] = a[i] * 2;
+for(size_t i = 0; i < n; ++i)
+    a[i] = a[i] + 1;
+
+//上述代码执行了：读+写+读+写，每个元素都需要访问四遍内存。
+//优化成一个循环体
+for(size_t i = 0; i < n; ++i)
+{
+    a[i] = a[i] * 2;
+    a[i] = a[i] + 1;
+}
+```
+
+### 一维jacobi迭代
+
+一些物理仿真中，常用到这种形式的迭代法：
+
+for (i=0...n) b[i] = a[i + 1] + a[i - 1];  // 假装是jacobi
+
+swap(a, b);   // 交换双缓冲
+
+// 不断反复...
+
+```cpp
+int main()
+{
+    for(int step = 0; step < steps; step++)
+    {
+        for(size_t i = 1; i < n - 1; ++i)
+            b[i] = (a[i-1] + a[i+1]) * 0.5f;
+       	std::swap(a, b);
+    }
+}
+```
+
+**将递推公式优化**
+
+既然递推公式 a’[i] = (a[i - 1] + a[i + 1]) * 0.5那么也应该有 a’’[i] = (a’[i - 1] + a’[i + 1]) * 0.5
+
+不妨带入(1)式到(2)式，得到：a’’[i] = (a[i - 2] + a[i + 2]) * 0.25 + a[i] * 0.5
+
+```cpp
+int main()
+{
+    for(int step = 0; step < steps/2; step++)
+    {
+        for(size_t i = 2; i < n - 2; ++i)
+        {
+            b[i] = (a[i-2]+a[i+2])*0.25f + a[i]*0.5f; //一次迭代两次
+        }
+        std::swap(a, b);
+    }
+}
+```
+
+**一步抵16步**
+
+- 注意到局部数组是64大小，这包含了中心的32个元素，还包含因为jacobi特性需要周围两个元素，导致迭代16次就需要往边缘扩张的16个元素
+- 因为局部数组的大小远远小于一级缓存，这样迭代时读写的带宽就是一级缓存的速度，几乎没有影响。
+- 这里一次循环体直接相当于16次迭代，两次就完了。但是可能加的有点过头变成cpu-bound了，所以只快了10倍左右，大家掌握里面的思想就好。
+
+- 加入unroll和simd更一步优化
+- 使用steam_ps防止写回操作污染缓存
+
+```cpp
+int main() {
+#pragma omp parallel for
+    for (intptr_t i = 0; i < n; i++) {
+        a[i] = std::sin(i * 0.1f);
+    }
+    TICK(iter);
+    for (int step = 0; step < steps; step++) {
+        constexpr intptr_t BS = 128;
+        constexpr intptr_t HS = 16;
+#pragma omp parallel for
+        for (intptr_t ibase = HS; ibase < n - HS; ibase += BS) {
+            float ta[BS + HS * 2], tb[BS + HS * 2];
+            for (intptr_t i = -HS; i < BS + HS; i++) {
+                ta[HS + i] = a[ibase + i];
+            }
+#pragma GCC unroll 8
+            for (intptr_t s = 2; s <= HS; s += 4) {
+#pragma omp simd
+                for (intptr_t i = -HS + 2; i < BS + HS - 2; i++) {
+                    tb[HS + i] = (ta[HS + i - 2] + ta[HS + i] + ta[HS + i] + ta[HS + i + 2]) * 0.25f;
+                }
+#pragma omp simd
+                for (intptr_t i = -HS + 4; i < BS + HS - 4; i++) {
+                    ta[HS + i] = (tb[HS + i - 2] + tb[HS + i] + tb[HS + i] + tb[HS + i + 2]) * 0.25f;
+                }
+            }
+            for (intptr_t i = 0; i < BS; i += 4) {
+                _mm_stream_ps(&b[ibase + i], _mm_loadu_ps(&tb[HS + i]));
+            }
+        }
+        std::swap(a, b);
+    }
+    TOCK(iter);
+    float loss = 0;
+#pragma omp parallel for reduction(+:loss)
+    for (intptr_t i = 1; i < n - 1; i++) {
+        loss += std::pow(a[i - 1] + a[i + 1] - a[i] * 2, 2);
+    }
+    loss = std::sqrt(loss);
+    std::cout << "loss: " << loss << std::endl;
+    return 0;
+}
+```
+
+## 内存分配和分页
+
+- vector 写入两次，时间都是一样
+- malloc/new int[n] 写入两次，第一次明显比第二次慢
+- new int[n]{} 写入两次，时间都是一样
+
+**内存惰性分配**
+
+- 原理：当调用 malloc 时，操作系统并不会实际分配那一块内存，而是将这一段内存标记为“不可用”。当用户试图访问（写入）这一片内存时，硬件就会触发所谓的缺页中断（page fault），进入操作系统内核，内核会查找当前进程的 malloc 历史记录。如果发现用户写入的地址是他曾经 malloc 过的地址区间，则执行实际的内存分配，并标记该段内存为“可用”，下次访问就不会再产生缺页中断了；而如果用户写入的地址根本不是他 malloc 过的地址，那就说明他确实犯错了，就抛出段错误（segmentation fault）
+- **分配是按页面(4kb)来管理**
+
+- 当一个尚且处于“不可用”的 malloc 过的区间被访问，操作系统不是把整个区间全部分配完毕，而是只把当前写入地址所在的页面（4KB 大小）给分配上。也就是说用户访问 a[0] 以后只分配了 4KB 的内存。等到用户访问了 a[1024]，也就是触及了下一个页面，他才会继续分配一个 4KB 的页面，这时才 8KB 被实际分配。比如这里我们分配了 16GB 内存，但是只访问了他的前 4KB，这样只有一个页被分配，所以非常快。
+
+让vector不初始化：
+
+```c++
+template <typename T>
+struct NoInit{
+    T value;
+    
+    NoInit(){}
+};
+
+int main()
+{
+    std::vector<NoInit<int>> arr(n);
+}
+```
+
+### 几种内存分配对齐
+
+- tbb/cache_aligned_alocator 可以重复利用内存
+- tbbmalloc 能保证64子节对齐
+- new/malloc 只保证16子节对齐
+- __mm_malloc(n, align) x86独有，保证align子节对齐
+- aligned_alloc(align, n) 跨平台， 保证align子节对齐
+
+### 手动池化
+
+thread_local: 保证每个线程一个，这样重复调用的时候不会重复分配内存
+
+```cpp
+float func(int n)
+{
+    static thread_local std::vector<float> tmp;
+    tmp.clear();	//对象析构
+    return ret;
+}
+```
+
+## 多维数组
+
+### c语言静态数组
+
+```cpp
+array<array<float, n>, m> a;
+float a[n][m];
+```
+
+
+
+![](./img/HPC_28.png)
+
+静态数组逻辑上是二维的，实际存储会扁平化以一维方式存储
+
+### 动态数组
+
+```cpp
+//不好的分配方式
+float **a = malloc(n * sizeof(float *));
+for (int i = 0; i < m; i++) a[i] = malloc(m * sizeof(float));
+
+for (int i = 0; i < m; i++) free(a[i]);
+free(a);
+
+//分配方式
+float *a = malloc(n * m * sizeof(float));
+
+```
+
+### 行主序和列主序
+
+![](./img/HPC_29.png)
+
+按照对应的存储方式去遍历，能保持时间上的连续性
+
+因为行列仅限于二维数组（矩阵），对高维数组可以直接按照他们的 xyz 下标名这样称呼：
+
+ZYX 序：(z * ny + y) * nx + xXYZ 序：z + nz * (y + x * ny)
+
+## 插桩与循环分块
+
+插桩：这个操作，就是说在结构网格中，从一个点往周围固定范围读取值，并根据一定权重累加，然后用于修改自身的值。
+
+### X方向插桩
+
+X 方向的插桩，因为最内层有另一个长度仅为 nblur*2+1 的顺序读取，让 CPU 误以为 t++ 是我们想要的顺序读取，然而 nblur*2+1 很快就执行完毕，顺序被打破，CPU 无法预判我们下一步要读哪里了。
+
+使用_mm_prefetch 指令手动提示 CPU
+
+```cpp
+//使用prefetch预取缓存行
+//_mm_prefetch 指令本身的执行也要花费不少时间。我们给预取提示给太频繁了，反而浪费了时间
+void BM_x_blur_prefetch()
+{
+#pragma omp parallel for collapse(2)
+    for(int y = 0; y < ny; ++y)
+    {
+        for(int x = 0; x < nx; ++x)
+        {
+            _mm_prefetch(&a(x+32, y), _MM_HINT_T0);
+            floar res = 0;
+            for(int t = -nblur; t <= nblur; ++t)
+                	res += a(x+t, y);
+           	b(x,y) = res;
+        }
+    }
+}
+
+//使用prefetch预取缓存行 并配合循环分块
+//循环分块的目的 让每次prefetch达到64子节
+void BM_x_blur_tiled_prefetched()
+{
+    for(auto _ : bm)
+    {
+#pragma omp parallel for collapse(2)
+        for(int y = 0; y < ny; ++y)
+        {
+            for(int xBase = 0; xBase < nx; xBase += 16)
+            {
+                _mm_prefetch(&a(xBase+16, y), _MM_HINT_T0); //16个float = 64子节 缓存行的大小
+                for(int x = xBase; x < xBase+16; ++x)
+                {
+                    float res = 0;
+                    for(int t = -nblur; t <= nblur; ++t)
+                		res += a(x+t, y);
+                    b(x,y) = res;
+                }
+            }
+        }
+    }
+}
+
+//用stream直写， 进一步优化写入带宽
+//分块+预取+直写
+void BM_x_blur_tiled_prefetched_streamed()
+{
+    for(auto _ : bm)
+    {
+#pragma omp parallel for collapse(2)
+        for(int y = 0; y < ny; ++y)
+        {
+            for(int xBase = 0; xBase < nx; xBase += 16)
+            {
+                _mm_prefetch(&a(xBase+16, y), _MM_HINT_T0); //16个float = 64子节 缓存行的大小
+                for(int x = xBase; x < xBase+16; ++x)
+                {
+                    __m128 res = _mm_setzero_ps();
+                    for(int t = -nblur; t <= nblur; ++t)
+                		res = _mm_add_ps(res, _mm_loadu_ps(&a(x+t, y)));
+                    _mm_stream_ps(&b(x, y), res);
+                }
+            }
+        }
+    }
+}
+```
+
+### Y方向插桩
+
+Y 方向的插桩比 X 方向慢好多：因为 X 方向的插桩所读取的数据，在内存中是连续的。而 Y 方向的插桩所读取的数据，在内存看来表现为跳跃 nx 大小来访问，是不连续的。
+
+![](./img/HPC_30.png)
+
+由于 Y 方向插桩的内存读取模式，有 nblur 次跳跃，每次跳跃的距离是 nx，从而缓存容量需要有 nx*nblur 那么大，才能利用全部的缓存，一级缓存只有 32KB 大
+
+可以用循环分块（loop tiling），将外部两层循环变为 blockSize 为跨步的，而内部则在区间 [xBase, xBase + blockSize) 上循环.
+
+```cpp
+//y插桩
+void BM_y_blur(benchmark::State &bm) {
+    for (auto _: bm) {
+#pragma omp parallel for collapse(2)
+        for (int y = 0; y < ny; y++) {
+            for (int x = 0; x < nx; x++) {
+                float res = 0;
+                for (int t = -nblur; t <= nblur; t++) {
+                    res += a(x, y + t);
+                }
+                b(x, y) = res;
+            }
+        }
+        benchmark::DoNotOptimize(a);
+    }
+}
+
+//分块1 降低命中所需的缓存容量
+void BM_y_blur_tiled(benchmark::State &bm)
+{
+    for(auto _: bm)
+    {
+        constexpr int blocksize = 32;
+#pragma omp parallel for collapse(2)
+        for(int yBase = 0; yBase < ny; yBase += blockSize)
+        {
+            for(int xBase = 0; xBase < nx; xBase += blockSize)
+            {
+                for(int y = yBase; y < yBase + blockSize; ++y)
+                {
+                    for(int x = xBase; x < xBase + blockSize; ++x)
+                    {
+                        float res = 0;
+                        for(int t = -nblur; x < xBase + blockSize; ++x)
+                        	res += a(x, y + t);
+                       	b(x, y) = res;
+                    }
+                }
+            }
+        }
+        benchmark::DoNotOptimize(a);
+    }
+}
+```
+
+**分块1：**YXyx 序，前两个大写 YX 表示外层大循环，后两个小写 yx 表示区间大小为 blockSize 的内层小循环。
+
+但是这样有一个很大的问题，如果插桩的读取范围跨越了 block 的边界，反而会变得跨度更大，导致缓存彻底失效。
+
+![](./img/HPC_31.png)
+
+**分块2：**可以只对 X 循环分块，并且把外层改成 XY 序，形成 XYx 序。
+
+![](./img/HPC_32.png)
+
+```cpp
+//让直写指令在时空上尽可能靠拢
+//把 res 变成数组暂时存一下，最后再一次性用 stream 写入。的确有正面效果！看来 stream 需要时空上集中一起效果才比较好
+void BM_y_blur_tiled_only_x_prefetched_streamed_merged(benchmark::State &bm) {
+    for (auto _: bm) {
+        constexpr int blockSize = 32;
+#pragma omp parallel for collapse(2)
+        for (int xBase = 0; xBase < nx; xBase += blockSize) {
+            for (int y = 0; y < ny; y++) {
+                for (int x = xBase; x < xBase + blockSize; x += 16) {
+                    _mm_prefetch(&a(x, y + nblur), _MM_HINT_T0);
+                    float res[16];
+                    for (int offset = 0; offset < 16; offset++) {
+                        res[offset] = 0;
+                        for (int t = -nblur; t <= nblur; t++) {
+                            res[offset] += a(x + offset, y + t);
+                        }
+                    }
+                    for (int offset = 0; offset < 16; offset++) {
+                        _mm_stream_si32((int *)&b(x + offset, y), (int &)res);
+                    }
+                }
+            }
+        }
+        benchmark::DoNotOptimize(a);
+    }
+}
+
+//把一次写入4字节的 _mm_stream_si32 换成了一次写入16字节的 _mm_stream_ps
+//顺便也把 res 换成了 __m128 的数组，并用 _mm 系列指令读取 a 和计算加法
+//把 t 循环和 offset 循环交换一下（loop-interchange），把 offset 换到内层循环去。这样至少能让四个寄存器同时在进行加法运算 启动指令级并行
+void BM_y_blur_tiled_only_x_prefetched_streamed_merged_vectorized_interchanged(benchmark::State &bm) {
+    for (auto _: bm) {
+        constexpr int blockSize = 32;
+#pragma omp parallel for collapse(2)
+        for (int xBase = 0; xBase < nx; xBase += blockSize) {
+            for (int y = 0; y < ny; y++) {
+                for (int x = xBase; x < xBase + blockSize; x += 16) {
+                    _mm_prefetch(&a(x, y + nblur), _MM_HINT_T0);
+                    __m128 res[4];
+                    for (int offset = 0; offset < 4; offset++) {
+                        res[offset] = _mm_setzero_ps();
+                    }
+                    for (int t = -nblur; t <= nblur; t++) {
+                        for (int offset = 0; offset < 4; offset++) {
+                            res[offset] = _mm_add_ps(res[offset],
+                                _mm_load_ps(&a(x + offset * 4, y + t)));
+                        }
+                    }
+                    for (int offset = 0; offset < 4; offset++) {
+                        _mm_stream_ps(&b(x + offset * 4, y), res[offset]);
+                    }
+                }
+            }
+        }
+        benchmark::DoNotOptimize(a);
+    }
+}
+
+//循环展开
+void BM_y_blur_tiled_only_x_prefetched_streamed_merged_vectorized_interchanged_unrolled(benchmark::State &bm) {
+    for (auto _: bm) {
+        constexpr int blockSize = 32;
+#pragma omp parallel for collapse(2)
+        for (int xBase = 0; xBase < nx; xBase += blockSize) {
+            for (int y = 0; y < ny; y++) {
+                for (int x = xBase; x < xBase + blockSize; x += 16) {
+                    _mm_prefetch(&a(x, y + nblur), _MM_HINT_T0);
+                    __m128 res[4];
+#pragma GCC unroll 4
+                    for (int offset = 0; offset < 4; offset++) {
+                        res[offset] = _mm_setzero_ps();
+                    }
+                    for (int t = -nblur; t <= nblur; t++) {
+#pragma GCC unroll 4
+                        for (int offset = 0; offset < 4; offset++) {
+                            res[offset] = _mm_add_ps(res[offset],
+                                _mm_load_ps(&a(x + offset * 4, y + t)));
+                        }
+                    }
+#pragma GCC unroll 4
+                    for (int offset = 0; offset < 4; offset++) {
+                        _mm_stream_ps(&b(x + offset * 4, y), res[offset]);
+                    }
+                }
+            }
+        }
+        benchmark::DoNotOptimize(a);
+    }
+}
+
+//__m128 一次处理四个float，改成 __m256 一次处理八个float，
+//预取的地址太靠近了，可能还是会让CPU陷入等待， 增加预取的提前量
+void BM_y_blur_tiled_only_x_prefetched_streamed_merged_vectorized_interchanged_unrolled_avx_forwarded(benchmark::State &bm) {
+    for (auto _: bm) {
+#pragma omp parallel for collapse(2)
+        for (int x = 0; x < nx; x += 32) {
+            for (int y = 0; y < ny; y++) {
+                _mm_prefetch(&a(x, y + nblur + 40), _MM_HINT_T0);
+                _mm_prefetch(&a(x + 16, y + nblur + 40), _MM_HINT_T0);
+                __m256 res[4];
+#pragma GCC unroll 4
+                for (int offset = 0; offset < 4; offset++) {
+                    res[offset] = _mm256_setzero_ps();
+                }
+                for (int t = -nblur; t <= nblur; t++) {
+#pragma GCC unroll 4
+                    for (int offset = 0; offset < 4; offset++) {
+                        res[offset] = _mm256_add_ps(res[offset],
+                            _mm256_load_ps(&a(x + offset * 8, y + t)));
+                    }
+                }
+#pragma GCC unroll 4
+                for (int offset = 0; offset < 4; offset++) {
+                    _mm256_stream_ps(&b(x + offset * 8, y), res[offset]);
+                }
+            }
+        }
+        benchmark::DoNotOptimize(a);
+    }
+}
+
+```
+
+## 矩阵和莫顿码
+
+### 案列：矩阵转置
+
+循环是 YX 序的，虽然 b(x, y) 也是 YX 序的没问题，但是 a(y, x) 相当于一个 XY 序的二维数组，从而在内存看来访存是跳跃的，违背了空间局域性。因为每次跳跃了 nx，所以只要缓存容量小于 nx 就无法命中
+
+```cpp
+for(int y = 0; y < ny; ++y)
+{
+    for(int x = 0; x < nx; ++x)
+        b(x, y) = a(y, x);
+}
+```
+
+解决方法当然还是循环分块。即 YXyx 序。这样只需要块的大小 blockSize^2 小于缓存容量，即可保证全部命中。
+
+![](./img/HPC_33.png)
+
+### 莫顿码
+
+如 x=x1x2x3, y=y1y2y3则他们的莫顿码：m(x,y)=y1x1y2x2y3x3
+
+二维莫顿编码可以把两个长度为n的二进制数，交错打包成一个长度2*n的二进制数。
+
+而莫顿编码的逆运算，就是莫顿解码。
+
+意义：可以用一维的 t 遍历二维的网格，然后用mdec(t) 求出要访问元素的 (x,y) 坐标，这样可以保证的数据在时间t上是接近的，同时二维空间上 (x,y) 也是接近的，有利于访存局域性。
+
+![](./img/HPC_34.png)
+
+## 多核下的缓存
+
+**伪共享**
+
+需要注意，如果多个核心在写数据集时访问的地址非常接近，这时候会变得很慢！
+
+假设一个核心修改了该缓存行的前32字节，另一个修改了后32字节，同时写回的话，结果要么是只有前32字节，要么是只有后32字节，而不能两个都正确写入。
+
+所以CPU为了安全起见，同时只能允许一个核心写入同一地址的缓存行。从而导致读写这个变量的速度受限于三级缓存的速度，而不是一级缓存的速度。
+
+```cpp
+std::vector<float> a(n);
+void BM_false_sharing(benchmark::State &bm) {
+    for (auto _: bm) {
+        std::vector<int> tmp(omp_get_max_threads());
+#pragma omp parallel for
+        for (int i = 0; i < n; i++) {
+            tmp[omp_get_thread_num()] += a[i];
+            benchmark::DoNotOptimize(tmp);
+        }
+        benchmark::DoNotOptimize(tmp);
+    }
+}
+```
+
+**消除伪共享**
+
+要想消除错误共享很简单，只需要把每个核心写入的地址尽可能分散开了就行了。比如这里，我们把每个核心访问的地方跨越了 16KB，这样CPU就知道每个核心之间不会发生冲突，从而可以放心地放在一级缓存里，不用担心会不会和其他核心共用了一个缓存行了。
+
+不过错误共享只会发生在写入的情况，如果多个核心同时读取两个很靠近的变量，是不会产生冲突的，也没有性能损失
+
+```cpp
+void BM_no_false_sharing(benchmark::State &bm) {
+    for (auto _: bm) {
+        std::vector<int> tmp(omp_get_max_threads() * 4096);
+#pragma omp parallel for
+        for (int i = 0; i < n; i++) {
+            tmp[omp_get_thread_num() * 4096] += a[i];  //16kb 一级缓存大小
+            benchmark::DoNotOptimize(tmp);
+        }
+        benchmark::DoNotOptimize(tmp);
+    }
+}
+```
 
 
 
@@ -2679,6 +3237,515 @@ for(int c = 0; c < DATA_SIZE; ++c)
     lookup[c] = (c >= 128)?c
 }
 ```
+
+# CUDA
+
+## 基础
+
+CUDA 的语法，基本完全兼容 C++。包括 C++17 新特性，都可以用。甚至可以把任何一个 C++ 项目的文件后缀名全部改成 .cu，都能编译出来。
+
+### 语法
+
+- `__global__` 用于定义核函数，他在 GPU 上执行，从 CPU 端通过三重尖括号语法调用，可以有参数，不可以有返回值。
+-  `__device__ `则用于定义设备函数，他在 GPU 上执行，但是从 GPU 上调用的，而且不需要三重尖括号，和普通函数用起来一样，可以有参数，有返回值。
+- `__host__`将函数定义在cpu上，默认不带标注宏都是host
+-  `cudaDeviceSynchronize()`，让 CPU 陷入等待，等 GPU 完成队列的所有任务后再返回
+- CUDA编译器的内敛：`__inline__;  __forceinline__;//强制内联 `
+
+```cpp
+//案列 main.cu
+#include <cstdio>
+#include <cuda_runtime.h>
+
+__device__ void say_hello(){
+    printf(“Hello, world!\n”);
+}
+
+__global__ void kernel(){
+    say_hello();
+}
+
+int main(){
+    kernel<<<1, 1>>>();
+    cudaDeviceSynchronize(); //cpu等待gpu队列上的任务完成后返回
+    return 0;
+}
+```
+
+**同时定义在cpu和gpu上**
+
+会在cpu和gpu上生成两份实例：
+
+- `__host__ __device__ `
+- constexpr函数会自动变成`__host__ __device__ `
+
+```cpp
+__host__ __device__ void say_hello(){
+    printf("Hello, world!\n");
+}
+```
+
+分开实现：
+
+- 一段代码他会先送到 CPU 上的编译器（通常是系统自带的编译器比如 gcc 和 msvc）生成 CPU 部分的指令码。然后送到真正的 GPU 编译器生成 GPU 指令码。最后再链接成同一个文件，看起来好像只编译了一次一样，实际上你的代码会被预处理很多次。
+- 他在 GPU 编译模式下会定义 __CUDA_ARCH__ 这个宏，这个宏是一个版本号，利用 #ifdef 判断该宏是否定义，就可以判断当前是否处于 GPU 模式，从而实现一个函数针对 GPU 和 CPU 生成两份源码级不同的代码。
+
+```cpp
+__host__ __device__ void say_hello(){
+#ifdef __CUDA_ARCH__
+    printf("Hello, world from GPU!\n");
+#else
+    printf("Hello, world from CPU!\n");
+#endif
+}
+```
+
+### CMake设置
+
+ 可以用 CMAKE_CUDA_ARCHITECTURES 这个变量，设置要针对哪个架构(版本号)生成 GPU 指令
+
+不同架构(版本号)编译的版本在不同环境下可能无法运行
+
+```cmake
+cmake_minimu_required(VERSION 3.10)
+
+set(CMAKE_CUDA_ARCHITECTURES 75) #75->rtx2080
+```
+
+## 线程与板块
+
+- 当前线程在板块中的编号：threadIdx
+- 当前板块中的线程数量：blockDim
+- 当前板块的编号：blockIdx
+- 总的板块数量：gridDim
+- 线程(thread)：并行的最小单位
+- 板块(block)：包含若干个线程
+- 网格(grid)：指整个任务，包含若干个板块
+- 从属关系：线程＜板块＜
+- 网格调用语法：<<<gridDim, blockDim>>>
+
+> 类比，GPU的版块相当于CPU的线程，GPU的线程相当于CPU的SIMD
+
+### 三维的板块和编号
+
+dim3(x,y,z)的形式
+
+```cpp
+__global__ void kernel(){
+    printf("hello\n");
+}
+int main(){
+    kernel <<<dim3(2,1,1), dim3(2,2,2)>>>();
+}
+```
+
+![](./img/HPC_35.png)
+
+之所以会把 blockDim 和 gridDim 分三维主要是因为 GPU 的业务常常涉及到三维图形学和二维图像，觉得这样很方便，并不一定 GPU 硬件上是三维这样排列的。三维情况下同样可以获取总的线程编号（扁平化）。
+
+如需总的线程数量：blockDim * gridDim
+
+如需总的线程编号：blockDim * blockIdx + threadIdx
+
+### gpu函数的分明错误
+
+默认情况下 GPU 函数必须定义在同一个文件里。如果你试图分离声明和定义，调用另一个文件里的 __device__ 或 __global__ 函数，就会出错。
+
+开启 CMAKE_CUDA_SEPARABLE_COMPILATION 选项（设为 ON），即可启用分离声明和定义的支持（建议放在一起）
+
+## 内存管理
+
+cpu和gpu间传递值需要注意：
+
+- GPU 和 CPU 各自使用着独立的内存。CPU 的内存称为主机内存(host)。GPU 使用的内存称为设备内存(device)，他是显卡上板载的，速度更快，又称显存。
+- 而不论栈还是 malloc 分配的都是 CPU 上的内存，所以自然是无法被 GPU 访问到
+- 因此可以用用 cudaMalloc 分配 GPU 上的显存，这样就不出错了，结束时 cudaFree 释放
+
+```cpp
+#include <cstdio>
+#include <cuda_runtime.h>
+//需将CUDA toolkit中的helper_cuda.h和helper_string.h放到头文件目录
+#include "helper_cuda.h" 
+
+__global__ void kernel(int *pret){
+    *pret = 42;
+}
+
+int main(){
+    int* pret;
+    checkCudaErrors(cudaMalloc(&pret, sizeof(int)));
+    kernel<<<1, 1>>>(pret);
+    checkCudaErrors(cudaDeviceSynchronize());
+    cudaFree(pret);
+    return 0;
+}
+```
+
+### 跨GPU/CPU地址空间拷贝数据
+
+- 可以用 cudaMemcpy，他能够在 GPU 和 CPU 内存之间拷贝数据。
+- 第四个参数：cudaMemcpyDeviceToHost（设备内存到主机内存）
+- 同理还有：cudaMemcpyHostToDevice 和 cudaMemcpyDeviceToDevice
+- 注意：cudaMemcpy 会自动进行同步操作，即和 cudaDeviceSynchronize() 等价！因此前面的 cudaDeviceSynchronize() 实际上可以删掉了。
+
+```cpp
+__global__ void kernel(int *pret){
+    *pret = 42;
+}
+
+int main(){
+    int* pret;
+    checkCudaErrors(cudaMalloc(&pret, sizeof(int)));
+    kernel<<<1, 1>>>(pret);
+    checkCudaErrors(cudaDeviceSynchronize());
+    int ret;
+    checkCudaErrors(cudaMemcpy(&ret, pret, sizeof(int), cudaMemcpyDeviceToHost)); //pret -> ret
+    printf("result: %d\n", ret);
+    return 0;
+}
+```
+
+### 同一内存地址技术
+
+还有一种在比较新的显卡上支持的特性，那就是统一内存(managed)，只需把 cudaMalloc 换成 cudaMallocManaged 即可，释放时也是通过 cudaFree。这样分配出来的地址，不论在 CPU 还是 GPU 上都是一模一样的，都可以访问。而且拷贝也会自动按需进行（当从 CPU 访问时），无需手动调用 cudaMemcpy，大大方便了编程人员，特别是含有指针的一些数据结构。
+
+但是会有一定的开销，尽量使用分离的设备内存和主机内存
+
+```cpp
+int main(){
+    int* pret;
+    cudaMallocManaged(&pret, sizeof(int));
+    kernel<<<1,1>>>(pret);
+    cudaDeviceSynchronize();
+    printf("result: %d\n", *pret);
+    cudaFree(pret);
+    return 0;
+}
+```
+
+### 总结
+
+主机内存(host)：malloc、free
+
+设备内存(device)：cudaMalloc、cudaFree
+
+统一内存(managed)：cudaMallocManaged、cudaFree
+
+## 数组
+
+如 malloc 一样，可以用 cudaMalloc 配合 n * sizeof(int)，分配一个大小为 n 的整型数组。这样就会有 n 个连续的 int 数据排列在内存中，而 arr 则是指向其起始地址。然后把 arr 指针传入 kernel，即可在里面用 arr[i] 访问他的第 i 个元素。
+
+可以采用多线程的方式给数组赋值
+
+```cpp
+#include<cstdio>
+#include<cuda_runtime.h>
+
+__global__ void kernel(int* arr, int n){
+    for(int i = 0; i < n; ++i)
+        arr[i] = i;
+}
+
+//多个线程并行赋值
+__global__ void kernel(int* arr, int n){
+    int i = threadIdx.x;
+    arr[i] = i;
+}
+
+//网格跨步循环 n=4 使用线程0,1赋值时处理
+__global__ void kernel(int* arr, int n){
+    for(int i = threadIdx.x; i < n; i += blockDim.x)
+        	arr[i] = i;
+}
+
+int main(){
+    int n = 32;
+    int* arr;
+    cudaMallocManaged(&arr, n*sizeof(int));
+    kernel<<<1, ,1>>>(arr, n);
+    cudaDeviceSynchronize();
+    for(int i = 0; i < n; ++i)
+        printf("arr[%d]: %d", i, arr[i]);
+    cudaFree(arr);
+    return 0;
+}
+
+```
+
+### 从线程到板块
+
+核函数内部，用之前说到的 blockDim.x + blockIdx.x + threadIdx.x 来获取线程在整个网格中编号。
+
+外部调用者，则是根据不同的 n 决定板块的数量（gridDim），而每个板块具有的线程数量（blockDim）则是固定的 128
+
+```cpp
+__global__ void kernel(int* arr, int n){
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    arr[i] = i;
+}
+
+int main(){
+    int n = 65536;
+    int* arr;
+    cudaMallocManaged(&arr, n*sizeof(int));
+    int nthreads = 128;
+    int nblocks = n/nthreads;
+    kernel<<<nblocks, nthreads>>>(arr, n);
+    
+    cudaFree(arr);
+    return 0;
+}
+```
+
+### 边角料难题
+
+n如果不是128的整数倍时，会出现问题。
+
+解决方法就是：采用向上取整的除法。 (n + nthreads + 1) / nthreads
+
+```cpp
+__global__ void kernel(int* arr, int n){
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i > n) return;
+    arr[i] = i;
+}
+
+int main(){
+    int n = 65536;
+    int* arr;
+    cudaMallocManaged(&arr, n*sizeof(int));
+    int nthreads = 128;
+    int nblocks = (n+nthreads+1)/nthreads;
+    kernel<<<nblocks, nthreads>>>(arr, n);
+    
+    cudaFree(arr);
+    return 0;
+}
+```
+
+### 网格跨步循环
+
+跨步循环，无论调用者指定每个板块多少线程（blockDim），总共多少板块（gridDim）。都能自动根据给定的 n 区间循环，不会越界，也不会漏掉几个元素。
+
+```cpp
+__global__ void kernel(int* arr, int n){
+    for(int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x*gridDim.x)
+        arr[i] = ;
+}
+
+int main(){
+    int n = 65536;
+    int* arr;
+    cudaMallocManaged(&arr, n*sizeof(int));
+    
+    kernel<<<32, 128>>>(arr, n);
+    
+    cudaFree(arr);
+    return 0;
+}
+```
+
+## c++封装
+
+修改std容器的allocator，即可在gpu上使用std的容器.
+
+可以通过给 allocator 添加 construct 成员函数，来魔改 vector 对元素的构造。默认情况下他可以有任意多个参数，而如果没有参数则说明是无参构造函数
+
+因此我们只需要判断是不是有参数，然后是不是传统的 C 语言类型（plain-old-data），如果是，则跳过其无参构造，从而避免在 CPU 上低效的零初始化。
+
+```cpp
+template <class T>
+struct CudaAllocator {
+    using value_type = T;
+
+    T *allocate(size_t size) {
+        T *ptr = nullptr;
+        checkCudaErrors(cudaMallocManaged(&ptr, size * sizeof(T)));
+        return ptr;
+    }
+
+    void deallocate(T *ptr, size_t size = 0) {
+        checkCudaErrors(cudaFree(ptr));
+    }
+	
+    template <class ...Args>
+    void construct(T *p, Args &&...args) {
+        if constexpr (!(sizeof...(Args) == 0 && std::is_pod_v<T>))
+            ::new((void *)p) T(std::forward<Args>(args)...);
+    }
+};
+```
+
+### 核函数也可为一个模板函数
+
+ __global__ 修饰的核函数自然也是可以为模板函数的。
+
+```cpp
+template <int N, class T>
+__global__ void kernel(T *arr) {
+    for (int i = blockDim.x * blockIdx.x + threadIdx.x;
+         i < N; i += blockDim.x * gridDim.x) {
+        arr[i] = i;
+    }
+}
+
+int main() {
+    constexpr int n = 65536;
+    std::vector<int, CudaAllocator<int>> arr(n);
+
+    kernel<n><<<32, 128>>>(arr.data());
+
+    checkCudaErrors(cudaDeviceSynchronize());
+    for (int i = 0; i < n; i++) {
+        printf("arr[%d]: %d\n", i, arr[i]);
+    }
+
+    return 0;
+}
+```
+
+### 核函数的参数可以接受仿函数
+
+不过要注意三点：
+
+- 这里的 Func 不可以是 Func const &，那样会变成一个指向 CPU 内存地址的指针，从而出错。所以 CPU 向 GPU 的传参必须按值传。
+
+- 做参数的这个函数必须是一个有着成员函数 operator() 的类型，即 functor 类。而不能是独立的函数，否则报错。
+
+- 这个函数必须标记为 __device__，即 GPU 上的函数，否则会变成 CPU 上的函数。
+
+```cpp
+template <class Func>
+__global__ void parallel_for(int n, Func func) {
+    for (int i = blockDim.x * blockIdx.x + threadIdx.x;
+         i < n; i += blockDim.x * gridDim.x) {
+        func(i);
+    }
+}
+
+struct MyFunctor {
+    __device__ void operator()(int i) const {
+        printf("number %d\n", i);
+    }
+};
+
+int main() {
+    int n = 65536;
+
+    parallel_for<<<32, 128>>>(n, MyFunctor{});
+
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    return 0;
+}
+```
+
+### 核函数的参数可以接受lambda表达式
+
+可以直接写 lambda 表达式，不过必须在 [] 后，() 前，插入 __device__ 修饰符。
+
+而且需要开启 --extended-lambda 开关。
+
+变量捕获：
+
+- 如果试图用 [&] 捕获变量是会出错的，毕竟这时候捕获到的是堆栈（CPU内存）上的变量 arr 本身，而不是 arr 所指向的内存地址（GPU内存）。
+- 正确的做法是先获取 arr.data() 的值到 arr_data 变量，然后用 [=] 按值捕获 arr_data，函数体里面也通过 arr_data 来访问 arr。
+
+```cpp
+int main() {
+    int n = 65536;
+
+    parallel_for<<<32, 128>>>(n, [] __device__ (int i) {
+        printf("number %d\n", i);
+    });
+	
+    //捕获变量
+    int *arr_data = arr.data();
+    parallel_for<<<32, 128>>>(n, [=] __device__ (int i) {
+        arr_data[i] = i;
+    });
+    
+    //或者
+    parallel_for<<<32, 128>>>(n, [arr = arr.data()] __device__ (int i) {
+        arr[i] = i;
+    });
+    
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    return 0;
+}
+
+
+```
+
+## 数字运算
+
+类似与cpu上的数字运算，gpu上也有类似的接口：
+
+- sin：double类型的正弦函数
+- sinf：float类型的正弦函数
+- __sinf:速度更快，但精度不完全准确的正弦函数
+
+```cpp
+template <class Func>
+__global__ void parallel_for(int n, Func func){
+    for(int i = blockDim.x*blockIdx.x+threadIdx.x; i < n; i += blockDim.x*gridDim.x){
+        func(i);
+    }
+}
+
+int main()
+{
+    int n = 1<<25;
+    std::vector<float, CudaAllocator<float>> gpu(n);
+    
+    //进行多核并行计算
+    parellel_for<<<32, 128>>>(n, [gpu = gpu.data()] __device__(int i){
+      gpu[i] = sinf(i);  
+    };);
+    cudaDevicSynchronize();
+    return 0;
+}
+```
+
+编译器选项：
+
+- 如果开启了 --use_fast_math 选项，那么所有对 sinf 的调用都会自动被替换成 __sinf。
+
+- --ftz=true 会把极小数(denormal)退化为0。
+
+- --prec-div=false 降低除法的精度换取速度。
+
+- --prec-sqrt=false 降低开方的精度换取速度。
+
+- --fmad 因为非常重要，所以默认就是开启的，会自动把 a * b + c 优化成乘加(FMA)指令。
+
+- **开启 --use_fast_math 后会自动开启上述所有**
+
+## thrust库
+
+CUDA官方提供了相应的thtust库，包含相应的容器、算法和alloc：
+
+- universal_vector: 类似vector
+- device_vector: 则是在 GPU 上分配内存
+- host_vector：则 在 CPU 上分配内存
+
+```cpp 
+#include <thrust/universal_vector.h>
+int main(){
+    thrust::universal_vector<float> x(n);
+    thrust::host_vector<float> x_host(n);
+    thrust::device_vector<float> x_host(n);
+}
+```
+
+### thrust库的算法：
+
+算法可以根据容器类型，自动决定在CPU和GPU上运行：
+
+for_each 可以用于 device_vector 也可用于 host_vector。当用于 host_vector 时则函数是在 CPU 上执行的，用于 device_vector 时则是在 GPU 上执行的
+
+
 
 # openmp和avx
 
@@ -2824,6 +3891,78 @@ long sum_arr(double *arr1, double *arr2, double *result)
 }
 ```
 
+### 使用avx256求和
+
+ _mm256_hadd_ps 计算方式参考 
+
+![https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_hadd_ps&ig_expand=3693]
+
+![https://blog.csdn.net/just_sort/article/details/94393506]
+
+```cpp
+template <typename T>
+T simpleSum(T* arr, uint64_t size)
+{
+    T sum = 0;
+    for (uint64_t i = 0; i < size; i++)
+        sum += arr[i];
+    return sum;
+}
+
+float avx2Sum(float* arr, uint64_t size)
+{
+    float sum[8] = {0};
+    __m256 sum256 = _mm256_setzero_ps();
+    __m256 load256 = _mm256_setzero_ps();
+    for (uint64_t i = 0; i < size; i += 8)
+    {
+        load256 = _mm256_loadu_ps(&arr[i]);
+        sum256 = _mm256_add_ps(sum256, load256);
+    }
+    sum256 = _mm256_hadd_ps(sum256, sum256);
+    sum256 = _mm256_hadd_ps(sum256, sum256);
+    _mm256_storeu_ps(sum, sum256);
+    sum[0] += sum[4];
+    return sum[0];
+}
+```
+
+### 案列优化
+
+```cpp
+for (int x = xBase; x < xBase + blockSize; x += 16) {
+    _mm_prefetch(&a(x, y + nblur), _MM_HINT_T0);
+    float res[16];
+    for (int offset = 0; offset < 16; offset++) {
+        res[offset] = 0;
+        for (int t = -nblur; t <= nblur; t++) {
+            res[offset] += a(x + offset, y + t);
+        }
+    }
+    for (int offset = 0; offset < 16; offset++) {
+        _mm_stream_si32((int *)&b(x + offset, y), (int &)res);
+    }
+}
+
+//向量化后
+for (int x = xBase; x < xBase + blockSize; x += 16) {
+    _mm_prefetch(&a(x, y + nblur), _MM_HINT_T0);
+    __m128 res[4];
+    for (int offset = 0; offset < 4; offset++) {
+        res[offset] = _mm_setzero_ps();
+        for (int t = -nblur; t <= nblur; t++) {
+            res[offset] = _mm_add_ps(res[offset],
+                _mm_load_ps(&a(x + offset * 4, y + t)));
+        }
+    }
+    for (int offset = 0; offset < 4; offset++) {
+        _mm_stream_ps(&b(x + offset * 4, y), res[offset]);
+    }
+}
+```
+
+
+
 ### AVX编程基础
 
 **数据类型**
@@ -2879,7 +4018,7 @@ m128/m128i/m128d/m256/m256i/m256d 当输入向量类型与返回向量的类型�
 | (2)_mm256_mullo_epi16/32                      | Multiply integers and store low halves              |
 | (2)_mm256_mulhi_epi16 (2)_mm256_mulhi_epu16   | Multiply integers and store high halves             |
 | (2)_mm256_mulhrs_epi16                        | Multiply 16-bit elements to form 32-bit elements    |
-| _mm256_div_ps/pd                              | 对两个float类型的向量进行想除                       |
+| _mm256_div_ps/pd                              | 对两个float类型的向量进行相除                       |
 
 **数据转换到AVX向量**
 
@@ -2933,3 +4072,14 @@ void _mm_stream_ps (float *p, __m128 a)
 | _mm_storer_ps | 反向，多条指令                 |
 | _mm_storeu_ps | 一条指令 不要求16子节对齐 常用 |
 | _mm_stream_ps | 直接写入内存 不改写cache的数据 |
+
+# 卷积实战
+
+相信大家对于卷积的概念都非常熟悉了，这里就不再重复提起了，我大概说一下我了解的卷积的计算方式有哪些吧。首先是暴力计算，这是最直观也是最简单的，但是这种方式访存很差，效率很低。其次是我在[基于NCNN的3x3可分离卷积再思考盒子滤波](https://mp.weixin.qq.com/s?__biz=MzA4MjY4NTk0NQ==&mid=2247488809&idx=1&sn=8fb2c0b60690cf580aadd6c6b7166201&scene=21#wechat_redirect)介绍过的手工展开某些特定的卷积核并且一次处理多行数据，这样做有个好处就是我们规避掉了一些在行方向进行频繁切换导致的Cache Miss增加，并且在列方向可以利用Neon进行加速。再然后就是比较通用的做法Im2Col+Sgemm+Pack，这种方式可以使得访存更好。其它常见的方法还有Winograd，FFT，Strassen等等。
+
+技术栈：
+
+- Sgemm: 单精度矩阵乘法
+- Pack: 数据打包，就是在Im2Col获得的二维矩阵的高维度进行压缩，在宽维度进行膨胀。
+- Winograd：以类似FFT一样降低计算量，它还不会引入复数
+- Strassen：矩阵乘法加速手段
