@@ -1,5 +1,9 @@
 # HPC（高性能）
 
+[TOC]
+
+
+
 # 测试工具
 
 ## windows
@@ -2323,6 +2327,23 @@ int main() {
 
 # 性能测试
 
+### time库
+
+```cpp
+//C++11映入std::chrono
+//时间点类型：chrono::steady_clock::time_point 等
+//时间段类型：chrono::milliseconds，chrono::seconds，chrono::minutes 等
+//方便的运算符重载：时间点+时间段=时间点，时间点-时间点=时间段
+#include <chrono>
+auto t0 = std::chrono::steady_clock::now();                            // 获取当前时间点
+auto t1 = t0 + chrono::seconds(30);                                 // 当前时间点的30秒后
+auto dt = t1 - t0;                                                                // 获取两个时间点的差（时间段）
+int64_t sec = chrono::duration_cast<chrono::seconds>(dt).count();  // 时间差的秒数
+
+```
+
+
+
 ### tbb提供的测试时间方法
 
 ```cpp
@@ -2734,6 +2755,28 @@ int main()
 - new/malloc 只保证16子节对齐
 - __mm_malloc(n, align) x86独有，保证align子节对齐
 - aligned_alloc(align, n) 跨平台， 保证align子节对齐
+
+```cpp
+#include <stdlib.h>
+#include <immintrin.h>
+
+int main() {
+    // 分配 32 字节对齐的内存空间
+    float* data = (float*) _mm_malloc(1024 * sizeof(float), 32);
+
+    // 使用分配的内存空间
+    for (int i = 0; i < 1024; i++) {
+        data[i] = i * 1.0;
+    }
+
+    // 释放内存空间
+    _mm_free(data);
+
+    return 0;
+}
+```
+
+
 
 ### 手动池化
 
@@ -3745,7 +3788,76 @@ int main(){
 
 for_each 可以用于 device_vector 也可用于 host_vector。当用于 host_vector 时则函数是在 CPU 上执行的，用于 device_vector 时则是在 GPU 上执行的
 
+## 原子操作
 
+对于数组求和问题，由于并行运算过程中有多个线程在进行写操作，可能照成最终的结果不正确。
+
+解决：使用原子操作或加锁。原子操作的功能就是保证读取/加法/写回三个操作，不会有另一个线程来打扰。
+
+```cpp
+#include <cuda_runtime.h>
+
+__global__ void parallel_sum(int* sum, int const* arr, int n){
+    for(int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x*gridDim.x)
+        atomicAdd(&sum[0], arr[i]);
+}
+
+int main()
+{
+    int n = 65536;
+    std::vector<int, CudaAllocator<int>> arr(n);
+    std::vector<int, CudaAllocator<int>> sum(1);
+    
+    for(int i = 0; i < n; ++i){
+        arr[i] = std::rand()%4;
+    }
+    parrallel_sum<<<n/128, 128>>>(sum.data(), arr.data(), n);
+    cudaDeviceSynchronize();
+    return 0;
+}
+```
+
+### 具体原子操作
+
+- atomicAdd(dst, src)：*dst += src*
+- *atomicSub(dst, src)：*dst -= src
+- atomicOr(dst, src)：*dst |= src*
+- *atomicAnd(dst, src)：*dst &= src
+- atomicXor(dst, src)：*dst ^= src*
+- *atomicMax(dst, src)：*dst = std::max(*dst, src)*
+- *atomicMin(dst, src)：*dst = std::min(*dst, src)
+- atomicExch(dst, src): std::swap(dst, src);
+- atomicCAS(dst, cmp, src): if(dst == cmp) dst = src;  
+- 当然，他们也都会返回旧值（如果需要的话）
+
+### 使用atomicCAS实现任意原子操作
+
+atomicCAS 的作用在于他可以用来实现任意 CUDA 没有提供的原子读-修改-写回指令。比如这里我们通过 atomicCAS 实现了整数 atomicAdd 同样的效果
+
+```cpp
+__device__ __inline__ int my_atomic_add(int* dst, int src){
+    int old = *dst, expect;
+    do{
+        expect = old;
+        old = atomicCAS(dst, expect, expect+src);
+    }while(expect != old);
+    return old;
+}
+
+//为了避免多次加锁，先在一个临时变量上存储结果
+__gloabal__ void parallel_sum(int* sum, int const* arr, int n){
+    int local_sum = 0;
+    for(int i = blockDim.x*blockIdx.x + threadIdx.x; i < n; i += blockDim.x*gridDim.x){
+        local_sum += arr[i];
+    }
+    
+    my_atomic_add(&sum[0], local_sum);
+}
+```
+
+### 原子操作影响
+
+不过由于原子操作要保证同一时刻只能有一个线程在修改某个地址，如果多个线程同时修改同一个就需要像“排队”那样，一个线程修改完了另一个线程才能进去，非常低效。但比直接加锁快。
 
 # openmp和avx
 
@@ -3766,6 +3878,7 @@ gcc编译时加入 `-fopenmp`
 #include <omp.h>
 int main()
 {
+    // #pragma omp parallel for //自动找到合适的线程
     #pragma omp parallel for num_threads(4)
     for(int i = 0; i < 10; ++i)
     {
@@ -3921,6 +4034,7 @@ float avx2Sum(float* arr, uint64_t size)
     }
     sum256 = _mm256_hadd_ps(sum256, sum256);
     sum256 = _mm256_hadd_ps(sum256, sum256);
+    //sum = _mm256_cvtss_f32(sum_256);
     _mm256_storeu_ps(sum, sum256);
     sum[0] += sum[4];
     return sum[0];
