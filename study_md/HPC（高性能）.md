@@ -3859,6 +3859,450 @@ __gloabal__ void parallel_sum(int* sum, int const* arr, int n){
 
 不过由于原子操作要保证同一时刻只能有一个线程在修改某个地址，如果多个线程同时修改同一个就需要像“排队”那样，一个线程修改完了另一个线程才能进去，非常低效。但比直接加锁快。
 
+## 板块和共享内存
+
+gpu实际的线程数量是板块数量(gridDim)乘以每板块线程数量(blockDim)
+
+### SM（Streaming Multiprocessors）与板块（block）
+
+GPU 是由多个流式多处理器（SM）组成的。每个 SM 可以处理一个或多个板块。SM类似cpu物理核心。
+
+SM 又由多个流式单处理器（SP）组成。每个 SP 可以处理一个或多个线程。
+
+每个 SM 都有自己的一块共享内存（shared memory），他的性质类似于 CPU 中的缓存——和主存相比很小，但是很快，用于缓冲临时数据。还有点特殊的性质，我们稍后会讲。
+
+**通常板块数量总是大于 SM 的数量**，这时英伟达驱动就会在多个 SM 之间调度你提交的各个板块。正如操作系统在多个 CPU 核心之间调度线程那样……不过有一点不同，GPU 不会像 CPU 那样做时间片轮换——板块一旦被调度到了一个 SM 上，就会一直执行，直到他执行完退出，这样的好处是不存在保存和切换上下文（寄存器，共享内存等）的开销，毕竟 GPU 的数据量比较大，禁不起这样切换来切换去……一个 SM 可同时运行多个板块，这时多个板块共用同一块共享内存（每块分到的就少了）。而板块内部的每个线程，则是被进一步调度到 SM 上的每个 SP。
+
+### sum求和案例
+
+> 无原子操作的求和
+
+```cpp
+__global__ void parallel_sum(int* sum, int const* arr, int n)
+{
+    for(int i = blockDim.x*blockIdx.x+threadIdx.x; i < n/1024; i += blockDim.x*gridDim.x)
+    {
+        int local_sum = 0;
+        for(int j = i*1024; j < i*1024+1024; ++j)
+            local_sum += arr[j];
+       	sum[i] = local_sum;
+    }
+}
+
+int main()
+{
+    parallel_sum<<<n/1024/128, 128>>>();
+    cudaDeviceSynchronize();
+}
+```
+
+> 读取到线程局部数组，然后分步缩减
+>
+> 无原子操作仍然是一个串行的过程，数据是强烈依赖的（local_sum += arr[j] 可以体现出，下一时刻的 local_sum 依赖于上一时刻的 local_sum）
+
+![](./img/HPC_36.png)
+
+```cpp
+__global__ void parallel_sum(int* sum, int const* arr, int n)
+{
+	for(int i = blockDim.x*blockIdx.x + threadIdx.x; i < n/1024; i += blockDim.x*gridDim.x)
+	{
+		int local_sum[1024];
+		for (int j = 0; j < 1024; j++) {
+            local_sum[j] = arr[i * 1024 + j];
+        }
+        for (int j = 0; j < 512; j++) {
+            local_sum[j] += local_sum[j + 512];
+        }
+        for (int j = 0; j < 256; j++) {
+            local_sum[j] += local_sum[j + 256];
+        }
+        for (int j = 0; j < 128; j++) {
+            local_sum[j] += local_sum[j + 128];
+        }
+        for (int j = 0; j < 64; j++) {
+            local_sum[j] += local_sum[j + 64];
+        }
+        for (int j = 0; j < 32; j++) {
+            local_sum[j] += local_sum[j + 32];
+        }
+        for (int j = 0; j < 16; j++) {
+            local_sum[j] += local_sum[j + 16];
+        }
+        for (int j = 0; j < 8; j++) {
+            local_sum[j] += local_sum[j + 8];
+        }
+        for (int j = 0; j < 4; j++) {
+            local_sum[j] += local_sum[j + 4];
+        }
+        for (int j = 0; j < 2; j++) {
+            local_sum[j] += local_sum[j + 2];
+        }
+        for (int j = 0; j < 1; j++) {
+            local_sum[j] += local_sum[j + 1];
+        }
+        sum[i] = local_sum[0];
+	}
+}
+```
+
+> 我们可以把刚刚的线程升级为板块，刚刚的 for 升级为线程，然后把刚刚 local_sum 这个线程局部数组升级为板块局部数组。
+>
+> 同一个板块中的每个线程，都共享着一块存储空间，他就是共享内存。在 CUDA 的语法中，共享内存可以通过定义一个修饰了 __shared__ 的变量来创建。
+>
+> 然后把刚刚的 j 换成板块编号，i 换成线程编号就好
+
+```cpp
+__global__ void parallel_sum(int* sum, int const* arr, int n)
+{
+    __shared__ int local_sum[1024];
+    int i = blockIdx.x;
+    int j = threadIdx.x;
+    local_sum[j] = arr[i*1024+j];
+    if (j < 512) {
+        local_sum[j] += local_sum[j + 512];
+    }
+    if (j < 256) {
+        local_sum[j] += local_sum[j + 256];
+    }
+    if (j < 128) {
+        local_sum[j] += local_sum[j + 128];
+    }
+    if (j < 64) {
+        local_sum[j] += local_sum[j + 64];
+    }
+    if (j < 32) {
+        local_sum[j] += local_sum[j + 32];
+    }
+    if (j < 16) {
+        local_sum[j] += local_sum[j + 16];
+    }
+    if (j < 8) {
+        local_sum[j] += local_sum[j + 8];
+    }
+    if (j < 4) {
+        local_sum[j] += local_sum[j + 4];
+    }
+    if (j < 2) {
+        local_sum[j] += local_sum[j + 2];
+    }
+    if (j == 0) {
+        sum[i] = local_sum[0] + local_sum[1];
+    }
+}
+```
+
+> 计算结果错误
+>
+> 这是因为 SM 执行一个板块中的线程时，并不是全部同时执行的。而是一会儿执行这个线程，一会儿执行那个线程
+>
+> 因为其中某个线程有可能因为在等待内存数据的抵达，这时大可以切换到另一个线程继续执行计算任务，等这个线程陷入内存等待时，原来那个线程说不定就好了呢？（记得上节课说过内存延迟是阻碍 CPU 性能提升的一大瓶颈，GPU 也是如此。CPU 解决方案是超线程技术，一个物理核提供两个逻辑核，当一个逻辑核陷入内存等待时切换到另一个逻辑核上执行，避免空转。GPU 的解决方法就是单个 SM 执行很多个线程，然后在遇到内存等待时，就自动切换到另一个线程）
+>
+> 给每个 if 分支后面加上 __syncthreads() 指令，强制同步当前板块内的所有线程。也就是让所有线程都运行到 __syncthreads() 所在位置以后，才能继续执行下去. syncthreads()指令必须没有歧义，即不在if判读中。
+
+```cpp
+__global__ void parallel_sum(int* sum, int const* arr, int n)
+{
+    __shared__ int local_sum[1024];
+    int i = blockIdx.x;
+    int j = threadIdx.x;
+    local_sum[j] = arr[i*1024+j];
+    __syncthreads();
+    if (j < 512) {
+        local_sum[j] += local_sum[j + 512];
+    }
+    __syncthreads();
+    if (j < 256) {
+        local_sum[j] += local_sum[j + 256];
+    }
+    __syncthreads();
+}
+```
+
+> 线程组：32个线程为一组
+>
+> SM 对线程的调度是按照 32 个线程为一组来调度的。也就是说，0-31号线程为一组
+>
+> 编译器可能对local_sum的访问进行了优化，可以使用volatile禁止编译器优化
+
+```cpp
+__global__ void parallel_sum(int *sum, int const *arr, int n) {
+    __shared__ int local_sum[1024];
+    int j = threadIdx.x;
+    int i = blockIdx.x;
+    local_sum[j] = arr[i * 1024 + j];
+    __syncthreads();
+    if (j < 512) {
+        local_sum[j] += local_sum[j + 512];
+    }
+    __syncthreads();
+    if (j < 256) {
+        local_sum[j] += local_sum[j + 256];
+    }
+    __syncthreads();
+    if (j < 128) {
+        local_sum[j] += local_sum[j + 128];
+    }
+    __syncthreads();
+    if (j < 64) {
+        local_sum[j] += local_sum[j + 64];
+    }
+    __syncthreads();
+    if (j < 32) {
+        local_sum[j] += local_sum[j + 32];
+    }
+    if (j < 16) {
+        local_sum[j] += local_sum[j + 16];
+    }
+    if (j < 8) {
+        local_sum[j] += local_sum[j + 8];
+    }
+    if (j < 4) {
+        local_sum[j] += local_sum[j + 4];
+    }
+    if (j < 2) {
+        local_sum[j] += local_sum[j + 2];
+    }
+    if (j == 0) {
+        sum[i] = local_sum[0] + local_sum[1];
+    }
+}
+```
+
+### 线程组分歧(warp divergence)
+
+GPU 线程组（warp）中 32 个线程实际是绑在一起执行的，就像 CPU 的 SIMD 那样。因此如果出现分支（if）语句时，如果 32 个 cond 中有的为真有的为假，则会导致两个分支都被执行
+
+不过在 cond 为假的那几个线程在真分支会避免修改寄存器和访存，产生副作用。而为了避免会产生额外的开销。因此建议 GPU 上的 if 尽可能 32 个线程都处于同一个分支，要么全部真要么全部假，否则实际消耗了两倍时间！
+
+### 对sum求和进行优化
+
+> 避免线程组分歧
+
+```cpp
+__global__ void parallel_sum(int *sum, int const *arr, int n) {
+    __shared__ volatile int local_sum[1024];
+    int j = threadIdx.x;
+    int i = blockIdx.x;
+    local_sum[j] = arr[i * 1024 + j];
+    __syncthreads();
+    if (j < 512) {
+        local_sum[j] += local_sum[j + 512];
+    }
+    __syncthreads();
+    if (j < 256) {
+        local_sum[j] += local_sum[j + 256];
+    }
+    __syncthreads();
+    if (j < 128) {
+        local_sum[j] += local_sum[j + 128];
+    }
+    __syncthreads();
+    if (j < 64) {
+        local_sum[j] += local_sum[j + 64];
+    }
+    __syncthreads();
+    if (j < 32) {
+        local_sum[j] += local_sum[j + 32];
+        local_sum[j] += local_sum[j + 16];
+        local_sum[j] += local_sum[j + 8];
+        local_sum[j] += local_sum[j + 4];
+        local_sum[j] += local_sum[j + 2];
+        if (j == 0) {
+            sum[i] = local_sum[0] + local_sum[1];
+        }
+    }
+}
+```
+
+> 使用网格跨步循环一次读取多个元素
+>
+> 进一步，当数组非常大，缩减后的数组可以继续递归地用 GPU 求和, 同样是缩并到一定小的程度开始就切断(cutoff)，开始用 CPU 串行求和。
+
+```cpp
+template <int blockSize, class T>
+__global__ void parallel_sum_kernel(T *sum, T const *arr, int n) {
+    __shared__ volatile int local_sum[blockSize];
+    int j = threadIdx.x;
+    int i = blockIdx.x;
+    T temp_sum = 0;
+    for (int t = i * blockSize + j; t < n; t += blockSize * gridDim.x) {
+        temp_sum += arr[t];
+    }
+    local_sum[j] = temp_sum;
+    __syncthreads();
+    if constexpr (blockSize >= 1024) {
+        if (j < 512)
+            local_sum[j] += local_sum[j + 512];
+        __syncthreads();
+    }
+    if constexpr (blockSize >= 512) {
+        if (j < 256)
+            local_sum[j] += local_sum[j + 256];
+        __syncthreads();
+    }
+    if constexpr (blockSize >= 256) {
+        if (j < 128)
+            local_sum[j] += local_sum[j + 128];
+        __syncthreads();
+    }
+    if constexpr (blockSize >= 128) {
+        if (j < 64)
+            local_sum[j] += local_sum[j + 64];
+        __syncthreads();
+    }
+    if (j < 32) {
+        if constexpr (blockSize >= 64)
+            local_sum[j] += local_sum[j + 32];
+        if constexpr (blockSize >= 32)
+            local_sum[j] += local_sum[j + 16];
+        if constexpr (blockSize >= 16)
+            local_sum[j] += local_sum[j + 8];
+        if constexpr (blockSize >= 8)
+            local_sum[j] += local_sum[j + 4];
+        if constexpr (blockSize >= 4)
+            local_sum[j] += local_sum[j + 2];
+        if (j == 0) {
+            sum[i] = local_sum[0] + local_sum[1];
+        }
+    }
+}
+
+template<int reduceScale = 4096, int blockSize = 256, int cutoffSize=reduceScale*2, class T>
+int parallel_sum(T const* arr, int n)
+{
+    if(n > cutoffSize)
+    {
+        std::vector<int, CudaAllocator<int>> sum(n / reduceScale);
+        parallel_sum_kernel<blockSize><<<n/reduceScale, blockSize>>>(sum.data(), arr, n);
+        return parallel_sum(sum.data(), n / reduceScale);
+    }
+    else
+    {
+        chechCudaErrors(cudaDeviceSynchronize());
+        T final_sum = 0;
+        for(int i = 0; i < n; ++i)
+        {
+            final_sum += arr[i];
+        }
+        return
+    }
+}
+```
+
+## 共享内存进阶
+
+### gpu的架构
+
+![](./img/HPC_37.png)
+
+> 内存模型
+
+![](./img/HPC_38.png)
+
+- gloabal memory(全局内存)： 在 main() 中通过 cudaMalloc 分配的内存
+- shared memory(共享内存)： 每个板块都有一个，通过 __shared__ 声明
+- local memory(寄存器)：存储着每个线程的局部变量，gpu函数内声明的局部变量
+
+### 线程数量过多和过少的影响
+
+> 数量过多
+
+当板块中的线程数量（blockDim）过多时，就会导致每个线程能够分配到的寄存器数量急剧缩小。而如果你的程序恰好用到了非常多的寄存器，那就没办法全部装在高效的寄存器仓库里，而是要把一部分“打翻”到一级缓存中，这时对这些寄存器读写的速度就和一级缓存一样，相对而言低效了。若一级缓存还装不下，那会打翻到所有 SM 共用的二级缓存。
+
+此外，如果在线程局部分配一个数组，并通过动态下标访问（例如遍历 BVH 时用到的模拟栈），那无论如何都是会打翻到一级缓存的，因为寄存器不能动态寻址。
+
+> 数量过少
+
+板块中的线程数量过少：延迟隐藏（latency hiding）失效：每个 SM 一次只能执行板块中的一个线程组（warp），也就是32个线程。而当线程组陷入内存等待时，可以切换到另一个线程，继续计算，这样一个 warp 的内存延迟就被另一个 warp 的计算延迟给隐藏起来了。因此，如果线程数量太少的话，就无法通过在多个 warp 之间调度来隐藏内存等待的延迟，从而低效
+
+此外，最好让板块中的线程数量（blockDim）为32的整数倍，否则假如是 33 个线程的话，那还是需要启动两个 warp，其中第二个 warp 只有一个线程是有效的，非常浪费。
+
+> 结论
+
+结论：对于使用寄存器较少、访存为主的核函数（例如矢量加法），使用大 blockDim 为宜。反之（例如光线追踪）使用小 blockDim，但也不宜太小。
+
+### 共享内存，区块(bank)
+
+- GPU 的共享内存，实际上是 32 块内存条通过并联组成的（有点类似 CPU 的双通道内存条）。
+- 每个 bank 都可以独立地访问，他们每个时钟周期都可以读取一个 int。
+- 然后，他们把地址空间分为 32 分，第 i 根内存条，负责 addr % 32 == i 的那几个 int 的存储。这样交错存储，可以保证随机访问时，访存能够尽量分摊到 32 个区块，这样速度就提升了 32 倍。
+
+![](./img/HPC_39.png)
+
+> 区块冲突
+
+然而这种设计有一个问题，那就是如果多个线程同时访问到了同一个 bank 的话，就需要排队。
+
+如果两个线程同时访问了 arr[0] 和 arr[32] 就会出现 bank conflict 导致必须排队影响性能！
+
+> bank conflict
+
+![](./img/HPC_40.png)
+
+- 如果多个线程同时访问arr[0],会采用广播的机制，避免区块冲突
+- 如果多个线程同时访问arr[0]和arr[32]则会产生区块冲突问题
+- 要解决的可以变成33的跨步
+
+### 案列： 矩阵转置
+
+```cpp
+template <class T>
+__global__ void parallel_transpose(T* out, T const* in, int nx, int ny)
+{
+    int linearized = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = linearized / nx;
+    int x = linearized % nx;
+	if(x >= nx || y >= ny) return ;
+  	out[y*nx + x] = in[x*nx + y];
+}
+int main()
+{
+    parallel_transpose<<<nx*ny/1024, 1024>>>(out.data(), int.data(), nx, ny);
+}
+
+//加入循环分块后
+template <class T>
+__global__ void parallel_transpose(T* out, T const* in, int nx, int ny)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+	if(x >= nx || y >= ny) return ;
+  	out[y*nx + x] = in[x*nx + y];
+}
+int main()
+{
+    parallel_transpose<<<dim3(nx/32, ny/32,1), dim3(32,32,1)>>(out.data(), int.data(), nx, ny);
+}
+
+```
+
+> 使用共享内存
+
+刚刚那样的话对 in 的读取是存在跨步的，而 GPU 喜欢连续的顺序读取，这样跨步就不高效了。但是因为我们的目的是做矩阵转置，无论是 in 还是 out 必然有一个是需要跨步的，怎么办？
+
+因此可以先通过把 in 分块，按块跨步地读，而块内部则仍是连续地读——从低效全局的内存读到高效的共享内存中，然后在共享内存中跨步地读，连续地写到 out 指向的低效的全局内存中。这样跨步的开销就开在高效的共享内存上，而不是低效的全局内存上，因此会变快。
+
+```cpp
+template <int blocksize, class T>
+__global__ void parallel_transpose(T* out, T const* in, int nx, int ny)
+{
+    int x = blockIdx.x * blockSize + threadIdx.x;
+    int y = blockIdx.y * blockSize + threadIdx.y;
+	if(x >= nx || y >= ny) return ;
+  	__shared__ T tmp[blockSize*blockSize];
+    int rx = blockIdx.y * blockSize + threadIdx.x;
+    int ry = blockIdx.x * blockSize + threadIdx.y;
+    tmp[threadIdx.y*blockSize + threadIdx.x] = in[ry*nx + rx];
+    __syncthreads();
+    out[y*nx + x] = tmp[threadIdx.x*blockSize + threadIdx.y];
+}
+```
+
+
+
+
+
 # openmp和avx
 
 ## openmp
